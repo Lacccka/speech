@@ -8,6 +8,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import Message, FSInputFile
 
@@ -79,13 +80,32 @@ async def handle_voice(message: Message):
 
     # скачиваем голосовое
     voice = message.voice
-    file = await bot.get_file(voice.file_id)
+    logger.info(
+        f"voice.file_id={voice.file_id}, voice.file_unique_id={voice.file_unique_id}"
+    )
+
+    if message.chat.type != "private" or message.forward_date:
+        await message.answer(
+            "Пришли голос, записанный прямо сюда, не пересланный."
+        )
+        return
 
     user_dir = user_voice_dir(user_id)
     ogg_path = user_dir / f"{voice.file_unique_id}.ogg"
     wav_path = user_dir / f"{voice.file_unique_id}.wav"
 
-    await bot.download_file(file.file_path, destination=ogg_path)
+    try:
+        await bot.download(voice, destination=ogg_path)
+    except TelegramBadRequest as exc:
+        logger.warning("Failed to download voice message: %s", exc)
+        await message.answer("Перешли голос ещё раз")
+        return
+
+    if not ogg_path.exists():
+        logger.error("Downloaded voice file not found at %s", ogg_path)
+        await message.answer("Перешли голос ещё раз")
+        return
+
     convert_to_wav(str(ogg_path), str(wav_path))
     ogg_path.unlink(missing_ok=True)
 
