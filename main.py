@@ -176,7 +176,13 @@ async def handle_text(message: Message):
     # синтез
     synthesize_ru(text, profile_path, str(out_path))
 
-    wav_to_ogg_opus(str(out_path), str(ogg_path))
+    try:
+        wav_to_ogg_opus(str(out_path), str(ogg_path))
+    except Exception:
+        logger.exception("Failed to convert WAV to OGG/Opus via ffmpeg")
+        await message.answer("не смог перекодировать аудио, проверь ffmpeg/libopus")
+        await set_state(user_id, "idle")
+        return
 
     voice_file = FSInputFile(str(ogg_path), filename="voice.ogg")
     await message.answer_voice(voice_file)

@@ -3,3 +3,4 @@ python-dotenv
 aiosqlite
 TTS
 pydub
+# Требуется установленный ffmpeg с поддержкой libopus (например, сборка gyan.dev full)

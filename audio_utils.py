@@ -53,9 +53,15 @@ def wav_to_ogg_opus(src: str, dst: str):
     """конвертация wav → ogg/opus с нормализацией громкости"""
     audio = AudioSegment.from_wav(src)
     normalized = normalize(audio)
+    normalized = normalized.set_channels(1).set_frame_rate(24_000)
     dst_path = Path(dst)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    normalized.export(dst_path, format="ogg", codec="opus")
+    normalized.export(
+        dst_path,
+        format="ogg",
+        codec="libopus",
+        bitrate="64k",
+    )
 
 
 def merge_user_voices(user_id: int, profile_path: Path):
