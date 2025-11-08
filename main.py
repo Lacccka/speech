@@ -1,9 +1,12 @@
 # main.py
 import asyncio
-import os
+import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+SRC_DIR = Path(__file__).resolve().parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, FSInputFile
@@ -20,10 +23,14 @@ from audio_utils import (
 )
 from tts_engine import synthesize_ru
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+from speech.config import load_config
+from speech.logging import configure_logging, get_logger
 
-bot = Bot(token=BOT_TOKEN)
+configure_logging()
+logger = get_logger(__name__)
+config = load_config()
+
+bot = Bot(token=config.bot.token)
 dp = Dispatcher()
 
 
@@ -136,6 +143,7 @@ async def handle_text(message: Message):
 
 async def main():
     await init_db()
+    logger.info("Starting Telegram bot polling")
     await dp.start_polling(bot)
 
 
