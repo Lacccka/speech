@@ -75,9 +75,13 @@ pytest
 ├── requirements.txt       # Список зависимостей (для совместимости)
 ├── src/
 │   └── speech/
-│       ├── __init__.py    # Пакет с утилитами конфигурации и логирования
+│       ├── __init__.py    # Публичный API пакета
 │       ├── config.py      # Загрузка конфигурации из окружения
-│       └── logging.py     # Базовая настройка логирования
+│       ├── features.py    # Извлечение мел-спектрограмм и MFCC
+│       ├── inference.py   # Высокоуровневый интерфейс для распознавания речи
+│       ├── logging.py     # Базовая настройка логирования
+│       ├── model.py       # Архитектуры CRNN/Transformer и загрузка весов
+│       └── training.py    # Циклы обучения, валидации и сохранение чекпоинтов
 ├── tts_engine.py          # Обёртка над моделью XTTS v2 для синтеза речи
 └── docs/
     ├── data_requirements.md
@@ -86,3 +90,88 @@ pytest
 
 ## Планы развития
 Смотрите подробный список задач и приоритетов в [docs/roadmap.md](docs/roadmap.md). Среди ключевых направлений развития — улучшение качества голосовых профилей, расширение языковой поддержки и автоматизация деплоя.
+
+## Распознавание речи: обучение и инференс
+В пакет `speech` добавлен модуль для обучения и инференса CTC-моделей распознавания речи на PyTorch.
+
+### Извлечение признаков
+```python
+import torch
+
+from speech import FeatureExtractionConfig
+from speech.features import batch_compute_mel_spectrogram, prepare_ctc_inputs
+
+config = FeatureExtractionConfig(sample_rate=16_000, n_mels=80)
+waveforms = [torch.randn(16_000)]  # 1 секунда псевдосигнала
+mel_specs = batch_compute_mel_spectrogram(waveforms, config)
+ctc_batch = prepare_ctc_inputs(mel_specs)
+print(ctc_batch.features.shape, ctc_batch.lengths)
+```
+
+Параметры `FeatureExtractionConfig` можно переопределять переменными окружения `FEATURE_*` либо напрямую в коде.
+
+### Обучение модели
+```python
+import torch
+from torch.utils.data import DataLoader
+
+from speech import FeatureExtractionConfig, ModelConfig, TrainingConfig
+from speech.model import model_from_config
+from speech.training import Trainer
+
+# Подготовьте свои датасеты и DataLoader'ы
+train_loader = DataLoader(...)
+val_loader = DataLoader(...)
+
+feature_config = FeatureExtractionConfig()
+model_config = ModelConfig(architecture="crnn", in_features=feature_config.n_mels)
+training_config = TrainingConfig(epochs=10, mixed_precision=True)
+
+model = model_from_config(model_config)
+optimizer = torch.optim.AdamW(model.parameters(), lr=training_config.learning_rate)
+criterion = torch.nn.CTCLoss(blank=0)
+
+trainer = Trainer(
+    model,
+    optimizer,
+    criterion,
+    train_loader,
+    val_loader=val_loader,
+    config=training_config,
+)
+trainer.fit()
+```
+
+Чекпоинты сохраняются в каталог `checkpoints/` (можно переопределить переменной `TRAIN_CHECKPOINT_DIR`). Для ускорения обучения включите `mixed_precision=True` и используйте CUDA.
+
+### Инференс и потоковая расшифровка
+```python
+import torch
+
+from speech import FeatureExtractionConfig, InferenceConfig, ModelConfig
+from speech.inference import SpeechRecognizer
+
+labels = ["_", "а", "б", "в", ...]  # алфавит модели, индекс 0 — blank
+feature_config = FeatureExtractionConfig()
+model_config = ModelConfig(architecture="crnn", num_classes=len(labels))
+inference_config = InferenceConfig(beam_width=5)
+
+recognizer = SpeechRecognizer.from_configs(
+    model_config,
+    feature_config,
+    inference_config,
+    labels,
+)
+
+# Пакетный режим
+waveform = torch.randn(16_000)
+result = recognizer.transcribe_batch([waveform])[0]
+print("Transcript:", result.transcript)
+
+# Потоковый режим
+chunks = [torch.randn(8_000), torch.randn(8_000)]
+for partial in recognizer.transcribe_stream(chunks):
+    print("Partial:", partial.transcript)
+```
+
+Beam search и language model fusion активируются флагом `use_beam_search=True` и передачей колбэка `lm_scorer`, возвращающего лог-вероятность для текущего префикса.
