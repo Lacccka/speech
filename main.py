@@ -49,6 +49,15 @@ async def cmd_start(message: Message):
 @dp.message(F.text == "🎙 Начать обучение")
 async def start_training(message: Message):
     user_id = message.from_user.id
+    _, state, _ = await get_user(user_id)
+
+    if state == "training":
+        await message.answer(
+            "Я уже жду новые голосовые. Отправь ещё несколько или нажми «🛑 Завершить обучение»."
+        )
+        return
+
+    clear_user_voices(user_id)
     await set_state(user_id, "training")
     await message.answer(
         "Ок, я в режиме обучения. Присылай голосовые подряд. Когда закончишь — нажми «🛑 Завершить обучение»."
@@ -76,6 +85,7 @@ async def handle_voice(message: Message):
 
     await bot.download_file(file.file_path, destination=ogg_path)
     convert_to_wav(str(ogg_path), str(wav_path))
+    ogg_path.unlink(missing_ok=True)
 
     await message.answer("Принял голосовое 👍")
 
@@ -83,6 +93,14 @@ async def handle_voice(message: Message):
 @dp.message(F.text == "🛑 Завершить обучение")
 async def finish_training(message: Message):
     user_id = message.from_user.id
+    _, state, _ = await get_user(user_id)
+
+    if state != "training":
+        await message.answer(
+            "Сейчас обучение не идёт. Сначала нажми «🎙 Начать обучение» и пришли голосовые."
+        )
+        return
+
     profile_path = user_profile_path(user_id)
 
     merged = merge_user_voices(user_id, profile_path)
@@ -121,6 +139,7 @@ async def handle_text(message: Message):
         await message.answer(
             "У тебя нет профиля голоса. Сначала обучи меня голосовыми."
         )
+        await set_state(user_id, "idle")
         return
 
     text = message.text.strip()
