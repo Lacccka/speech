@@ -20,6 +20,8 @@ from audio_utils import (
     clear_user_voices,
     user_profile_path,
     user_output_path,
+    user_output_ogg_path,
+    wav_to_ogg_opus,
 )
 from tts_engine import synthesize_ru
 
@@ -148,12 +150,15 @@ async def handle_text(message: Message):
         return
 
     out_path = user_output_path(user_id)
+    ogg_path = user_output_ogg_path(user_id)
     await message.answer("Генерирую...")
 
     # синтез
     synthesize_ru(text, profile_path, str(out_path))
 
-    voice_file = FSInputFile(str(out_path), filename="voice.wav")
+    wav_to_ogg_opus(str(out_path), str(ogg_path))
+
+    voice_file = FSInputFile(str(ogg_path), filename="voice.ogg")
     await message.answer_voice(voice_file)
 
     # вернём в обычный режим

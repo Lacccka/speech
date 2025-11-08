@@ -37,10 +37,25 @@ def user_output_path(user_id: int) -> Path:
     return d / "out.wav"
 
 
+def user_output_ogg_path(user_id: int) -> Path:
+    d = OUTPUTS_DIR / str(user_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "out.ogg"
+
+
 def convert_to_wav(src_path: str, dst_path: str):
     """конвертация ogg/opus → wav"""
     audio = AudioSegment.from_file(src_path)
     audio.export(dst_path, format="wav")
+
+
+def wav_to_ogg_opus(src: str, dst: str):
+    """конвертация wav → ogg/opus с нормализацией громкости"""
+    audio = AudioSegment.from_wav(src)
+    normalized = normalize(audio)
+    dst_path = Path(dst)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized.export(dst_path, format="ogg", codec="opus")
 
 
 def merge_user_voices(user_id: int, profile_path: Path):
