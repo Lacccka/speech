@@ -107,6 +107,11 @@ def compute_mel_spectrogram(
     normalize:
         If ``True`` the mel spectrogram is mean-variance normalised across the
         time dimension.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape ``(n_mels, frames)``.
     """
 
     if waveform.dim() == 1:
@@ -145,6 +150,14 @@ def compute_mel_spectrogram(
         magnitude = stft.abs() ** config.power
         fb = _mel_filterbank(config, device, dtype)
         mel_spec = torch.einsum("mf,cft->cmt", fb, magnitude)
+
+    if mel_spec.dim() == 3:
+        mel_spec = mel_spec.mean(dim=0)
+    elif mel_spec.dim() != 2:
+        raise ValueError(
+            "Mel spectrogram must have shape (n_mels, frames) after channel reduction, "
+            f"but received tensor with shape {tuple(mel_spec.shape)}"
+        )
 
     if config.log_mel:
         mel_spec = _apply_log(mel_spec)
