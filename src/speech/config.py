@@ -85,6 +85,12 @@ class TTSConfig:
     language: str = "ru"
     gpt_conditioning_length: Optional[int] = None
     reference_duration: Optional[float] = None
+    chunk_crossfade_ms: int = 75
+    chunk_target_dbfs: float = -20.0
+    silence_threshold: int = -50
+    silence_chunk_len: int = 10
+    deesser_frequency: int = 6000
+    deesser_reduction_db: float = 12.0
 
 
 @dataclass(slots=True)
@@ -224,6 +230,12 @@ def load_config(env_file: Optional[os.PathLike[str] | str] = None) -> AppConfig:
         reference_duration=(
             lambda value: float(value) if value else None
         )(_get_env("TTS_REFERENCE_DURATION")),
+        chunk_crossfade_ms=_get_env_int("TTS_CHUNK_CROSSFADE_MS", 75),
+        chunk_target_dbfs=_get_env_float("TTS_CHUNK_TARGET_DBFS", -20.0),
+        silence_threshold=_get_env_int("TTS_SILENCE_THRESHOLD", -50),
+        silence_chunk_len=_get_env_int("TTS_SILENCE_CHUNK_LEN", 10),
+        deesser_frequency=_get_env_int("TTS_DEESSER_FREQUENCY", 6000),
+        deesser_reduction_db=_get_env_float("TTS_DEESSER_REDUCTION_DB", 12.0),
     )
 
     return AppConfig(

@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from pydub import AudioSegment
-from pydub.effects import normalize
 
 SRC_DIR = Path(__file__).resolve().parent / "src"
 if str(SRC_DIR) not in sys.path:
@@ -36,7 +35,7 @@ from audio_utils import (
     wav_to_ogg_opus,
 )
 from training import continue_training, train_new_voice
-from tts_engine import synthesize_ru
+from tts_engine import assemble_segments, normalize_to_target, synthesize_ru
 
 from speech.config import load_config
 from speech.logging import configure_logging, get_logger
@@ -137,6 +136,14 @@ def synthesize_with_splitting(
         else config.tts.reference_duration
     )
 
+    chunk_kwargs = dict(synthesis_kwargs)
+    chunk_kwargs.setdefault("crossfade_ms", config.tts.chunk_crossfade_ms)
+    chunk_kwargs.setdefault("target_dbfs", config.tts.chunk_target_dbfs)
+    chunk_kwargs.setdefault("silence_threshold", config.tts.silence_threshold)
+    chunk_kwargs.setdefault("silence_chunk_len", config.tts.silence_chunk_len)
+    chunk_kwargs.setdefault("deesser_frequency", config.tts.deesser_frequency)
+    chunk_kwargs.setdefault("deesser_reduction_db", config.tts.deesser_reduction_db)
+
     if len(chunks) == 1:
         synthesize_ru(
             chunks[0],
@@ -145,12 +152,12 @@ def synthesize_with_splitting(
             language=effective_language,
             gpt_cond_len=effective_gpt_condition_length,
             reference_duration=effective_reference_duration,
-            **synthesis_kwargs,
+            **chunk_kwargs,
         )
         return
 
     temp_paths: List[Path] = []
-    combined = AudioSegment.silent(duration=0)
+    chunk_segments: List[AudioSegment] = []
 
     try:
         for idx, chunk in enumerate(chunks):
@@ -162,12 +169,20 @@ def synthesize_with_splitting(
                 language=effective_language,
                 gpt_cond_len=effective_gpt_condition_length,
                 reference_duration=effective_reference_duration,
-                **synthesis_kwargs,
+                **chunk_kwargs,
             )
             temp_paths.append(temp_path)
-            combined += AudioSegment.from_wav(temp_path)
+            chunk_segments.append(AudioSegment.from_wav(temp_path))
 
-        combined = normalize(combined)
+        effective_crossfade = chunk_kwargs["crossfade_ms"]
+        combined = assemble_segments(
+            chunk_segments,
+            crossfade_ms=effective_crossfade,
+        )
+        combined = normalize_to_target(
+            combined,
+            target_dbfs=chunk_kwargs["target_dbfs"],
+        )
         combined.export(out_path, format="wav")
     finally:
         for temp_path in temp_paths:

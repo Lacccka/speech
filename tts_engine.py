@@ -1,13 +1,14 @@
 # tts_engine.py
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from TTS.api import TTS
 from pydub import AudioSegment
-from pydub.effects import normalize
+from pydub.silence import detect_nonsilent
 
 MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
 _tts: Optional[TTS] = None
@@ -69,18 +70,95 @@ def _split_text_with_overlap(
     return chunks
 
 
-def _concatenate_audio(segments: Iterable[AudioSegment]) -> AudioSegment:
-    """Concatenate the provided audio segments preserving their order."""
+def trim_silence(
+    segment: AudioSegment,
+    *,
+    silence_thresh: int = -50,
+    chunk_size: int = 10,
+) -> AudioSegment:
+    """Remove leading and trailing silence from ``segment``.
 
-    iterator = iter(segments)
-    first = next(iterator, None)
-    if first is None:
-        raise ValueError("No audio segments provided for concatenation")
+    Parameters
+    ----------
+    segment:
+        The audio segment to trim.
+    silence_thresh:
+        Amplitude threshold in dBFS below which audio is treated as silence.
+    chunk_size:
+        Resolution of the silence detector in milliseconds.
+    """
 
-    result = first
-    for segment in iterator:
-        result += segment
-    return result
+    if len(segment) == 0:
+        return segment
+
+    nonsilent_ranges = detect_nonsilent(
+        segment,
+        min_silence_len=chunk_size,
+        silence_thresh=silence_thresh,
+    )
+
+    if not nonsilent_ranges:
+        return segment
+
+    start, end = nonsilent_ranges[0][0], nonsilent_ranges[-1][1]
+    return segment[start:end]
+
+
+def apply_deesser(
+    segment: AudioSegment,
+    *,
+    frequency: int = 6000,
+    reduction_db: float = 12.0,
+) -> AudioSegment:
+    """Apply a light-weight de-esser approximation to ``segment``.
+
+    The implementation relies on inverting a high-pass filtered copy of the
+    signal to attenuate overly sharp sibilants.
+    """
+
+    if len(segment) == 0:
+        return segment
+
+    high_band = segment.high_pass_filter(frequency)
+    inverted = high_band.invert_phase().apply_gain(reduction_db)
+    return segment.overlay(inverted)
+
+
+def normalize_to_target(segment: AudioSegment, *, target_dbfs: float = -20.0) -> AudioSegment:
+    """Normalize ``segment`` so that its loudness matches ``target_dbfs``."""
+
+    if len(segment) == 0:
+        return segment
+
+    current_dbfs = segment.dBFS
+    if math.isinf(current_dbfs):
+        return segment
+
+    gain = target_dbfs - current_dbfs
+    return segment.apply_gain(gain)
+
+
+def assemble_segments(
+    segments: Sequence[AudioSegment],
+    *,
+    crossfade_ms: int = 75,
+) -> AudioSegment:
+    """Join audio ``segments`` using crossfades to ensure smooth transitions."""
+
+    if not segments:
+        raise ValueError("No audio segments provided for assembly")
+
+    combined = segments[0]
+    if len(segments) == 1:
+        return combined
+
+    for segment in segments[1:]:
+        effective_crossfade = max(
+            0,
+            min(crossfade_ms, len(combined), len(segment)),
+        )
+        combined = combined.append(segment, crossfade=effective_crossfade)
+    return combined
 
 
 def get_tts() -> TTS:
@@ -161,10 +239,7 @@ def _synthesize_to_file(
     wav = synthesizer.tts(**synthesis_args)
     synthesizer.save_wav(wav=wav, path=out_wav)
 
-    audio = AudioSegment.from_file(out_wav)
-    audio = normalize(audio)
-    audio.export(out_wav, format="wav")
-    return audio
+    return AudioSegment.from_file(out_wav)
 
 
 def synthesize_ru(
@@ -175,10 +250,29 @@ def synthesize_ru(
     language: Optional[str] = "ru",
     gpt_cond_len: Optional[int] = None,
     reference_duration: Optional[float] = None,
+    crossfade_ms: int = 75,
+    target_dbfs: float = -20.0,
+    silence_threshold: int = -50,
+    silence_chunk_len: int = 10,
+    deesser_frequency: int = 6000,
+    deesser_reduction_db: float = 12.0,
     **extra_options: Any,
 ) -> None:
+    def _process_segment(segment: AudioSegment) -> AudioSegment:
+        trimmed = trim_silence(
+            segment,
+            silence_thresh=silence_threshold,
+            chunk_size=silence_chunk_len,
+        )
+        deessed = apply_deesser(
+            trimmed,
+            frequency=deesser_frequency,
+            reduction_db=deesser_reduction_db,
+        )
+        return normalize_to_target(deessed, target_dbfs=target_dbfs)
+
     if len(text) <= 250:
-        _synthesize_to_file(
+        segment = _synthesize_to_file(
             text,
             profile_wav,
             out_wav,
@@ -187,27 +281,27 @@ def synthesize_ru(
             reference_duration=reference_duration,
             extra_options=extra_options,
         )
+        processed = _process_segment(segment)
+        processed.export(out_wav, format="wav")
         return
 
     text_chunks = _split_text_with_overlap(text)
-    audio_segments: List[AudioSegment] = []
+    processed_segments: List[AudioSegment] = []
 
     with TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         for idx, chunk in enumerate(text_chunks):
             chunk_path = tmp_path / f"chunk_{idx}.wav"
-            audio_segments.append(
-                _synthesize_to_file(
-                    chunk,
-                    profile_wav,
-                    str(chunk_path),
-                    language=language,
-                    gpt_cond_len=gpt_cond_len,
-                    reference_duration=reference_duration,
-                    extra_options=extra_options,
-                )
+            raw_segment = _synthesize_to_file(
+                chunk,
+                profile_wav,
+                str(chunk_path),
+                language=language,
+                gpt_cond_len=gpt_cond_len,
+                reference_duration=reference_duration,
+                extra_options=extra_options,
             )
+            processed_segments.append(_process_segment(raw_segment))
 
-    combined = _concatenate_audio(audio_segments)
-    combined = normalize(combined)
+    combined = assemble_segments(processed_segments, crossfade_ms=crossfade_ms)
     combined.export(out_wav, format="wav")
