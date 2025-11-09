@@ -21,13 +21,12 @@ from keyboards import main_kb
 from audio_utils import (
     user_voice_dir,
     convert_to_wav,
-    merge_user_voices,
     clear_user_voices,
-    user_profile_path,
     user_output_path,
     user_output_ogg_path,
     wav_to_ogg_opus,
 )
+from training import continue_training, train_new_voice
 from tts_engine import synthesize_ru
 
 from speech.config import load_config
@@ -35,6 +34,13 @@ from speech.logging import configure_logging, get_logger
 
 SAFE_TEXT_LENGTH = 250
 DEFAULT_CHUNK_LENGTH = 180
+
+TRAINING_STATE_NEW = "training_new"
+TRAINING_STATE_CONTINUE = "training_continue"
+TRAINING_STATE_SELECT = "training_select"
+
+TRAINING_MODE_NEW_COMMANDS = {"новое обучение", "начать заново", "новое"}
+TRAINING_MODE_CONTINUE_COMMANDS = {"продолжить обучение", "дообучить", "продолжить"}
 
 
 configure_logging()
@@ -135,25 +141,49 @@ async def cmd_start(message: Message):
     )
 
 
+async def _enter_training_mode(message: Message, user_id: int, mode: str) -> None:
+    if mode == TRAINING_STATE_NEW:
+        clear_user_voices(user_id)
+        await set_state(user_id, TRAINING_STATE_NEW)
+        await message.answer(
+            "Я очистил предыдущие записи. Присылай новые голосовые подряд. Для стабильного результата собери 20–60 минут"
+            " чистых записей одним голосом: короткие сегменты по 2–10 секунд в одинаковых условиях (ровная тональность,"
+            " без шумов, один и тот же микрофон). Записи можно накапливать и использовать позже для дообучения."
+            " Когда закончишь — нажми «🛑 Завершить обучение»."
+        )
+    elif mode == TRAINING_STATE_CONTINUE:
+        await set_state(user_id, TRAINING_STATE_CONTINUE)
+        await message.answer(
+            "Принял режим дообучения. Присылай дополнительные голосовые — я добавлю их к тем, что уже сохранены."
+            " Когда закончишь — нажми «🛑 Завершить обучение»."
+        )
+
+
+def _has_saved_voices(user_id: int) -> bool:
+    voice_dir = user_voice_dir(user_id)
+    return any(voice_dir.glob("*.wav"))
+
+
 @dp.message(F.text == "🎙 Начать обучение")
 async def start_training(message: Message):
     user_id = message.from_user.id
-    _, state, _ = await get_user(user_id)
+    _, state, profile_path = await get_user(user_id)
 
-    if state == "training":
+    if state in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
-            "Я уже жду новые голосовые. Отправь ещё несколько или нажми «🛑 Завершить обучение»."
+            "Я уже жду голосовые. Отправь ещё несколько или нажми «🛑 Завершить обучение»."
         )
         return
 
-    clear_user_voices(user_id)
-    await set_state(user_id, "training")
-    await message.answer(
-        "Ок, я в режиме обучения. Присылай голосовые подряд. Для стабильного результата собери 20–60 минут"
-        " чистых записей одним голосом: короткие сегменты по 2–10 секунд в одинаковых условиях (ровная тональность,"
-        " без шумов, один и тот же микрофон). Записи можно накапливать и использовать позже для дообучения."
-        " Когда закончишь — нажми «🛑 Завершить обучение»."
-    )
+    if _has_saved_voices(user_id) or profile_path:
+        await set_state(user_id, TRAINING_STATE_SELECT)
+        await message.answer(
+            "У тебя уже есть записи. Выбери режим: напиши «Новое обучение», чтобы начать заново (старые записи удалю),"
+            " или «Продолжить обучение», чтобы добавить новые образцы к уже сохранённым."
+        )
+        return
+
+    await _enter_training_mode(message, user_id, TRAINING_STATE_NEW)
 
 
 @dp.message(F.voice)
@@ -161,7 +191,7 @@ async def handle_voice(message: Message):
     user_id = message.from_user.id
     _, state, _ = await get_user(user_id)
 
-    if state != "training":
+    if state not in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
             "Сейчас ты не в режиме обучения. Нажми «🎙 Начать обучение»."
         )
@@ -206,24 +236,25 @@ async def finish_training(message: Message):
     user_id = message.from_user.id
     _, state, _ = await get_user(user_id)
 
-    if state != "training":
+    if state not in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
             "Сейчас обучение не идёт. Сначала нажми «🎙 Начать обучение» и пришли голосовые."
         )
         return
 
-    profile_path = user_profile_path(user_id)
+    if state == TRAINING_STATE_NEW:
+        merged = train_new_voice(user_id)
+    else:
+        merged = continue_training(user_id)
 
-    merged = merge_user_voices(user_id, profile_path)
     if not merged:
         await message.answer(
             "Я не нашёл записей. Пришли хотя бы одно голосовое в режиме обучения."
         )
         return
 
-    await set_profile(user_id, str(profile_path))
+    await set_profile(user_id, merged)
     await set_state(user_id, "idle")
-    clear_user_voices(user_id)
 
     await message.answer(
         "Готово! Я собрал твой голос. Теперь нажми «🗣 Сгенерировать» и пришли текст."
@@ -244,6 +275,18 @@ async def ask_text(message: Message):
 async def handle_text(message: Message):
     user_id = message.from_user.id
     user_id, state, profile_path = await get_user(user_id)
+
+    if state == TRAINING_STATE_SELECT:
+        text = (message.text or "").casefold()
+        if text in TRAINING_MODE_NEW_COMMANDS:
+            await _enter_training_mode(message, user_id, TRAINING_STATE_NEW)
+        elif text in TRAINING_MODE_CONTINUE_COMMANDS:
+            await _enter_training_mode(message, user_id, TRAINING_STATE_CONTINUE)
+        else:
+            await message.answer(
+                "Не понял режим. Напиши «Новое обучение» или «Продолжить обучение»."
+            )
+        return
 
     # реагируем только если пользователь в режиме генерации
     if state != "generate":
