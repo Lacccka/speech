@@ -2,6 +2,10 @@
 import asyncio
 import sys
 from pathlib import Path
+from typing import List
+
+from pydub import AudioSegment
+from pydub.effects import normalize
 
 SRC_DIR = Path(__file__).resolve().parent / "src"
 if str(SRC_DIR) not in sys.path:
@@ -29,12 +33,93 @@ from tts_engine import synthesize_ru
 from speech.config import load_config
 from speech.logging import configure_logging, get_logger
 
+SAFE_TEXT_LENGTH = 250
+DEFAULT_CHUNK_LENGTH = 180
+
+
 configure_logging()
 logger = get_logger(__name__)
 config = load_config()
 
 bot = Bot(token=config.bot.token)
 dp = Dispatcher()
+
+
+def split_text_for_tts(text: str, max_chars: int = DEFAULT_CHUNK_LENGTH) -> List[str]:
+    """
+    Делит текст на части, стараясь не превышать max_chars и не разбивать слова.
+    """
+
+    chunks: List[str] = []
+    buffer: List[str] = []
+
+    def flush_buffer() -> None:
+        if buffer:
+            combined = " ".join(buffer).strip()
+            if combined:
+                chunks.append(combined)
+            buffer.clear()
+
+    for paragraph in text.splitlines():
+        paragraph = paragraph.strip()
+        if not paragraph:
+            flush_buffer()
+            continue
+
+        words = paragraph.split()
+        for word in words:
+            if not buffer:
+                buffer.append(word)
+                continue
+
+            prospective = f"{' '.join(buffer)} {word}"
+            if len(prospective) <= max_chars:
+                buffer.append(word)
+            else:
+                flush_buffer()
+                buffer.append(word)
+
+    flush_buffer()
+
+    if not chunks:
+        stripped = text.strip()
+        if stripped:
+            return [stripped[:max_chars]]
+        return []
+
+    return chunks
+
+
+def synthesize_with_splitting(text: str, profile_path: str, out_path: Path) -> None:
+    """
+    Вызывает синтез с дроблением длинного текста и объединяет WAV-файлы.
+    """
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    chunks = split_text_for_tts(text)
+    if not chunks:
+        raise ValueError("Передан пустой текст для синтеза")
+
+    if len(chunks) == 1:
+        synthesize_ru(chunks[0], profile_path, str(out_path))
+        return
+
+    temp_paths: List[Path] = []
+    combined = AudioSegment.silent(duration=0)
+
+    try:
+        for idx, chunk in enumerate(chunks):
+            temp_path = out_path.with_name(f"{out_path.stem}_part{idx}.wav")
+            synthesize_ru(chunk, profile_path, str(temp_path))
+            temp_paths.append(temp_path)
+            combined += AudioSegment.from_wav(temp_path)
+
+        combined = normalize(combined)
+        combined.export(out_path, format="wav")
+    finally:
+        for temp_path in temp_paths:
+            temp_path.unlink(missing_ok=True)
 
 
 @dp.message(CommandStart())
@@ -44,7 +129,8 @@ async def cmd_start(message: Message):
         "Привет! Я бот для клонирования голоса.\n\n"
         "🔹 Нажми «🎙 Начать обучение» и пришли несколько голосовых.\n"
         "🔹 Потом «🛑 Завершить обучение» — я соберу профиль.\n"
-        "🔹 Потом «🗣 Сгенерировать» и пришли текст — я озвучу его твоим голосом.",
+        "🔹 Потом «🗣 Сгенерировать» и пришли текст — я озвучу его твоим голосом.\n\n"
+        f"ℹ️ Один запрос — до {SAFE_TEXT_LENGTH} символов текста.",
         reply_markup=main_kb(),
     )
 
@@ -145,7 +231,10 @@ async def finish_training(message: Message):
 async def ask_text(message: Message):
     user_id = message.from_user.id
     await set_state(user_id, "generate")
-    await message.answer("Пришли текст, который нужно озвучить твоим голосом.")
+    await message.answer(
+        f"Пришли текст, который нужно озвучить твоим голосом (до {SAFE_TEXT_LENGTH} символов за один запрос)."
+        " Если нужно больше — отправляй по частям или используй пошаговую генерацию."
+    )
 
 
 @dp.message(F.text)
@@ -166,15 +255,27 @@ async def handle_text(message: Message):
 
     text = message.text.strip()
     if not text:
-        await message.answer("Текст пустой 🤔 Пришли нормальный текст.")
+        await message.answer(
+            f"Текст пустой 🤔 Пришли нормальный текст до {SAFE_TEXT_LENGTH} символов."
+        )
+        return
+
+    if len(text) > SAFE_TEXT_LENGTH:
+        await message.answer(
+            "Сообщение слишком длинное для безопасной генерации."
+            f" Пожалуйста, сократи его до {SAFE_TEXT_LENGTH} символов"
+            " или запусти пошаговую генерацию, отправляя фрагменты последовательно."
+        )
         return
 
     out_path = user_output_path(user_id)
     ogg_path = user_output_ogg_path(user_id)
-    await message.answer("Генерирую...")
+    await message.answer(
+        "Генерирую... Помни, что лучше держать отдельные запросы в пределах допустимой длины."
+    )
 
     # синтез
-    synthesize_ru(text, profile_path, str(out_path))
+    synthesize_with_splitting(text, profile_path, out_path)
 
     try:
         wav_to_ogg_opus(str(out_path), str(ogg_path))

@@ -18,7 +18,11 @@ def get_tts():
 def synthesize_ru(text: str, profile_wav: str, out_wav: str):
     tts = get_tts()
     tts.tts_to_file(
-        text=text, file_path=out_wav, speaker_wav=profile_wav, language="ru"
+        text=text,
+        file_path=out_wav,
+        speaker_wav=profile_wav,
+        language="ru",
+        enable_text_splitting=True,
     )
     # лёгкая постобработка
     audio = AudioSegment.from_file(out_wav)
