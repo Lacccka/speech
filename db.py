@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS samples (
 """
 
 
-async def _ensure_column(db: aiosqlite.Connection, table: str, column: str, definition: str) -> None:
+async def _ensure_column(
+    db: aiosqlite.Connection, table: str, column: str, definition: str
+) -> None:
     cursor = await db.execute(f"PRAGMA table_info({table})")
     columns = await cursor.fetchall()
     if not any(col[1] == column for col in columns):
@@ -220,7 +222,7 @@ async def delete_user_samples(user_id: int, session_id: Optional[int] = None) ->
                 "DELETE FROM samples WHERE user_id = ? AND session_id = ?",
                 (user_id, session_id),
             )
-    await db.commit()
+        await db.commit()
 
 
 async def set_pending_tts_text(user_id: int, text: Optional[str]) -> None:
