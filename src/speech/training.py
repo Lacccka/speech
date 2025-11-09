@@ -95,6 +95,7 @@ class Trainer:
     def train_epoch(self) -> float:
         self.model.train()
         total_loss = 0.0
+        batch_count = 0
         for batch_idx, batch in enumerate(self.train_loader, start=1):
             features, feature_lengths, targets, target_lengths = self._prepare_batch(batch)
             self.optimizer.zero_grad(set_to_none=True)
@@ -119,9 +120,10 @@ class Trainer:
 
             total_loss += loss.item()
             self.state.global_step += 1
+            batch_count += 1
 
             if batch_idx % self.config.log_interval == 0:
-                avg_loss = total_loss / batch_idx
+                avg_loss = total_loss / batch_count
                 self.logger.info(
                     "Epoch %d | Step %d | Avg loss %.4f",
                     self.state.epoch + 1,
@@ -129,7 +131,10 @@ class Trainer:
                     avg_loss,
                 )
 
-        return total_loss / max(1, batch_idx)
+        if batch_count == 0:
+            return 0.0
+
+        return total_loss / batch_count
 
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
