@@ -82,6 +82,9 @@ class InferenceConfig:
 class TTSConfig:
     """Configuration options for the XTTS synthesizer."""
 
+    backend: str = "coqui"
+    model_name: str = "tts_models/multilingual/multi-dataset/xtts_v2"
+    model_path: Optional[Path] = None
     language: str = "ru"
     gpt_conditioning_length: Optional[int] = None
     reference_duration: Optional[float] = None
@@ -237,6 +240,12 @@ def load_config(env_file: Optional[os.PathLike[str] | str] = None) -> AppConfig:
     )
 
     tts_config = TTSConfig(
+        backend=_get_env("TTS_BACKEND", "coqui") or "coqui",
+        model_name=_get_env(
+            "TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2"
+        )
+        or "tts_models/multilingual/multi-dataset/xtts_v2",
+        model_path=_get_env_path("TTS_MODEL_PATH"),
         language=_get_env("TTS_LANGUAGE", "ru") or "ru",
         gpt_conditioning_length=_get_env_optional_int("TTS_GPT_CONDITION_LENGTH"),
         reference_duration=_get_env_optional_float("TTS_REFERENCE_DURATION"),

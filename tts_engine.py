@@ -2,17 +2,134 @@
 from __future__ import annotations
 
 import math
+import inspect
+from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from TTS.api import TTS
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
 
-MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
+from speech.config import TTSConfig, load_config
+
+_CONFIG_LOADER: Callable[[], TTSConfig] = lambda: load_config().tts
+_cached_tts_config: Optional[TTSConfig] = None
 _tts: Optional[TTS] = None
 _synthesizer: Any | None = None
+
+BackendFactory = Callable[[TTSConfig], Any]
+_BACKEND_FACTORIES: Dict[str, BackendFactory] = {}
+
+
+def register_tts_backend(name: str, factory: BackendFactory) -> None:
+    """Register a callable ``factory`` that builds a TTS engine for ``name``."""
+
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("Backend name must be a non-empty string")
+    _BACKEND_FACTORIES[normalized] = factory
+
+
+def _get_tts_config() -> TTSConfig:
+    global _cached_tts_config
+    if _cached_tts_config is None:
+        _cached_tts_config = _CONFIG_LOADER()
+    return _cached_tts_config
+
+
+def _coqui_backend_factory(config: TTSConfig) -> TTS:
+    kwargs: Dict[str, Any] = {}
+    if config.model_path is not None:
+        kwargs["model_path"] = str(config.model_path)
+    return TTS(config.model_name, **kwargs)
+
+
+register_tts_backend("coqui", _coqui_backend_factory)
+
+
+def _invoke_factory(factory: Callable[..., Any], config: TTSConfig) -> Any:
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return factory(config)
+
+    params = signature.parameters
+    if not params:
+        return factory()
+
+    positional_args: List[Any] = []
+    keyword_args: Dict[str, Any] = {}
+
+    def _as_path(value: Optional[Path]) -> Optional[str]:
+        return str(value) if value is not None else None
+
+    for name, param in params.items():
+        if name == "self":
+            continue
+
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            # Assume the factory can figure out advanced signatures itself.
+            continue
+
+        wants_argument = param.default is inspect._empty
+
+        if name in {"config", "cfg", "tts_config"} or param.annotation is TTSConfig:
+            target = config
+        elif name in {"model_name", "model", "model_id"}:
+            target = config.model_name
+        elif name in {"model_path", "checkpoint_path"}:
+            target = _as_path(config.model_path)
+            if target is None and wants_argument:
+                raise ValueError(
+                    "TTS backend requires a model path but none was configured"
+                )
+        else:
+            if wants_argument:
+                raise TypeError(
+                    f"Cannot determine value for required parameter '{name}' when "
+                    f"instantiating backend '{factory!r}'"
+                )
+            continue
+
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional_args.append(target)
+        else:
+            keyword_args[name] = target
+
+    return factory(*positional_args, **keyword_args)
+
+
+def _resolve_backend_factory(backend_name: str) -> BackendFactory:
+    normalized = backend_name.strip().lower()
+    if not normalized:
+        raise ValueError("TTS backend name must not be empty")
+
+    if normalized in _BACKEND_FACTORIES:
+        return _BACKEND_FACTORIES[normalized]
+
+    module_name, separator, attr_name = backend_name.rpartition(".")
+    if not separator:
+        raise ValueError(
+            f"Unknown TTS backend '{backend_name}'. Provide a registered name or"
+            " a dotted import path"
+        )
+
+    module = import_module(module_name)
+    factory = getattr(module, attr_name)
+    if not callable(factory):
+        raise TypeError(
+            f"Backend '{backend_name}' resolved to non-callable object {factory!r}"
+        )
+
+    return lambda cfg: _invoke_factory(factory, cfg)
 
 
 def _split_text_with_overlap(
@@ -161,15 +278,16 @@ def assemble_segments(
     return combined
 
 
-def get_tts() -> TTS:
+def get_tts() -> Any:
     global _tts
     if _tts is None:
-        # загрузится 1 раз на всё время работы бота
-        _tts = TTS(MODEL_NAME)
+        config = _get_tts_config()
+        factory = _resolve_backend_factory(config.backend)
+        _tts = factory(config)
     return _tts
 
 
-def _build_synthesizer(tts: TTS) -> Any:
+def _build_synthesizer(tts: Any) -> Any:
     synthesizer = getattr(tts, "synthesizer", None)
     if synthesizer is not None:
         return synthesizer
@@ -177,7 +295,7 @@ def _build_synthesizer(tts: TTS) -> Any:
     load_model = getattr(tts, "load_model", None)
     init_synthesizer = getattr(tts, "init_synthesizer", None)
     if callable(load_model) and callable(init_synthesizer):
-        model_name = getattr(tts, "model_name", MODEL_NAME)
+        model_name = getattr(tts, "model_name", _get_tts_config().model_name)
         try:
             components = load_model(model_name)
         except TypeError:
@@ -194,7 +312,9 @@ def _build_synthesizer(tts: TTS) -> Any:
             synthesizer = getattr(tts, "synthesizer", None)
 
     if synthesizer is None and hasattr(tts, "load_tts_model_by_name"):
-        tts.load_tts_model_by_name(getattr(tts, "model_name", MODEL_NAME))
+        tts.load_tts_model_by_name(
+            getattr(tts, "model_name", _get_tts_config().model_name)
+        )
         synthesizer = getattr(tts, "synthesizer", None)
 
     if synthesizer is None:

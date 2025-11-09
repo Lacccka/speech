@@ -149,6 +149,19 @@ fake_dotenv.load_dotenv = _noop
 sys.modules.setdefault("dotenv", fake_dotenv)
 
 import tts_engine
+from speech.config import TTSConfig
+
+
+def _dummy_backend_factory(tts_config: TTSConfig) -> object:
+    class _DummyBackend:
+        def __init__(self, name: str, model_path: str | None) -> None:
+            self.name = name
+            self.model_path = model_path
+
+    return _DummyBackend(
+        tts_config.model_name,
+        str(tts_config.model_path) if tts_config.model_path is not None else None,
+    )
 
 
 def _build_segment(
@@ -332,3 +345,63 @@ def test_main_synthesize_with_splitting_fast_mode(tmp_path: Path, monkeypatch: p
     expected_length = sum(len(segment) for segment in segments)
     assert len(combined) == pytest.approx(expected_length, abs=3)
     assert abs(combined.dBFS - (-18.0)) > 1.5
+
+
+def test_get_tts_uses_model_from_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = TTSConfig(
+        backend="coqui",
+        model_name="custom/model",
+        model_path=tmp_path / "checkpoint.pth",
+    )
+
+    loader_calls = {"value": 0}
+
+    def fake_loader() -> TTSConfig:
+        loader_calls["value"] += 1
+        return config
+
+    class DummyEngine:
+        def __init__(self, model_name: str, **kwargs: object) -> None:
+            self.model_name = model_name
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(tts_engine, "_CONFIG_LOADER", fake_loader)
+    monkeypatch.setattr(tts_engine, "_cached_tts_config", None)
+    monkeypatch.setattr(tts_engine, "_tts", None)
+    monkeypatch.setattr(tts_engine, "_synthesizer", None)
+    monkeypatch.setattr(tts_engine, "TTS", DummyEngine)
+
+    engine = tts_engine.get_tts()
+
+    assert loader_calls["value"] == 1
+    assert isinstance(engine, DummyEngine)
+    assert engine.model_name == "custom/model"
+    assert engine.kwargs == {"model_path": str(config.model_path)}
+
+    assert tts_engine.get_tts() is engine
+    assert loader_calls["value"] == 1
+
+
+def test_get_tts_supports_custom_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = TTSConfig(
+        backend="tests.test_tts_processing._dummy_backend_factory",
+        model_name="alt/model",
+        model_path=tmp_path / "backend.pth",
+    )
+
+    def fake_loader() -> TTSConfig:
+        return config
+
+    monkeypatch.setattr(tts_engine, "_CONFIG_LOADER", fake_loader)
+    monkeypatch.setattr(tts_engine, "_cached_tts_config", None)
+    monkeypatch.setattr(tts_engine, "_tts", None)
+    monkeypatch.setattr(tts_engine, "_synthesizer", None)
+
+    engine = tts_engine.get_tts()
+
+    assert engine.name == "alt/model"
+    assert engine.model_path == str(config.model_path)
