@@ -259,7 +259,21 @@ async def get_speaker_references(user_id: int) -> List[str]:
             (user_id,),
         )
         rows = await cursor.fetchall()
-        return [row[0] for row in rows]
+        references = [row[0] for row in rows]
+        normalised = _normalise_references(references)
+
+        if len(normalised) != len(references):
+            await db.execute(
+                """
+                DELETE FROM speaker_references
+                WHERE user_id = ? AND TRIM(file_path) = ''
+                """,
+                (user_id,),
+            )
+            await _resequence_positions(db, user_id)
+            await db.commit()
+
+        return normalised
 
 
 def _normalise_references(references: Sequence[str]) -> List[str]:
