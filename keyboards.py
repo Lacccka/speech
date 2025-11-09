@@ -11,3 +11,14 @@ def main_kb():
         ],
         resize_keyboard=True,
     )
+
+
+def generation_mode_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⚡ Быстро"), KeyboardButton(text="🎧 Качество")],
+            [KeyboardButton(text="⬅️ Назад")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )

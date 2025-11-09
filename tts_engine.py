@@ -251,14 +251,18 @@ def synthesize_ru(
     gpt_cond_len: Optional[int] = None,
     reference_duration: Optional[float] = None,
     crossfade_ms: int = 75,
-    target_dbfs: float = -20.0,
+    target_dbfs: Optional[float] = -20.0,
     silence_threshold: int = -50,
     silence_chunk_len: int = 10,
     deesser_frequency: int = 6000,
     deesser_reduction_db: float = 12.0,
+    enable_post_processing: bool = True,
     **extra_options: Any,
 ) -> None:
     def _process_segment(segment: AudioSegment) -> AudioSegment:
+        if not enable_post_processing:
+            return segment
+
         trimmed = trim_silence(
             segment,
             silence_thresh=silence_threshold,
@@ -269,6 +273,8 @@ def synthesize_ru(
             frequency=deesser_frequency,
             reduction_db=deesser_reduction_db,
         )
+        if target_dbfs is None:
+            return deessed
         return normalize_to_target(deessed, target_dbfs=target_dbfs)
 
     if len(text) <= 250:
@@ -304,4 +310,6 @@ def synthesize_ru(
             processed_segments.append(_process_segment(raw_segment))
 
     combined = assemble_segments(processed_segments, crossfade_ms=crossfade_ms)
+    if enable_post_processing and target_dbfs is not None:
+        combined = normalize_to_target(combined, target_dbfs=target_dbfs)
     combined.export(out_wav, format="wav")

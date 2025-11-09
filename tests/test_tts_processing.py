@@ -118,11 +118,14 @@ fake_db.start_user_session = _noop
 fake_db.add_sample = _noop
 fake_db.get_latest_samples = lambda *args, **kwargs: []
 fake_db.delete_user_samples = _noop
+fake_db.set_pending_tts_text = _noop
+fake_db.get_pending_tts_text = lambda *args, **kwargs: None
 
 sys.modules.setdefault("db", fake_db)
 
 fake_keyboards = types.ModuleType("keyboards")
 fake_keyboards.main_kb = lambda: None
+fake_keyboards.generation_mode_kb = lambda: None
 sys.modules.setdefault("keyboards", fake_keyboards)
 
 fake_audio_utils = types.ModuleType("audio_utils")
@@ -264,7 +267,12 @@ def test_main_synthesize_with_splitting_crossfade(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(main_module.config.tts, "chunk_target_dbfs", -16.0)
 
     output_path = tmp_path / "result.wav"
-    main_module.synthesize_with_splitting("hello world" * 30, "profile.wav", output_path)
+    main_module.synthesize_with_splitting(
+        "hello world" * 30,
+        "profile.wav",
+        output_path,
+        mode="quality",
+    )
 
     combined = AudioSegment.from_file(output_path)
 
@@ -272,3 +280,44 @@ def test_main_synthesize_with_splitting_crossfade(tmp_path: Path, monkeypatch: p
     expected_length = sum(len(segment) for segment in segments) - 60
     assert len(combined) == pytest.approx(expected_length, abs=3)
     assert combined.dBFS == pytest.approx(-16.0, abs=1.5)
+
+
+def test_main_synthesize_with_splitting_fast_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BOT_TOKEN", "token")
+
+    import importlib
+    import sys
+
+    if "main" in sys.modules:
+        main_module = sys.modules["main"]
+        main_module = importlib.reload(main_module)
+    else:
+        main_module = importlib.import_module("main")
+
+    segments = [
+        Sine(220).to_audio_segment(duration=200).apply_gain(-10),
+        Sine(440).to_audio_segment(duration=200).apply_gain(-12),
+    ]
+
+    monkeypatch.setattr(main_module, "split_text_for_tts", lambda text, max_chars=180: ["a", "b"])
+
+    call_index = {"value": 0}
+
+    def fake_synthesize_ru(text: str, profile_path: str, out_path: str, **kwargs: object) -> None:
+        segment = segments[call_index["value"]]
+        call_index["value"] += 1
+        segment.export(out_path, format="wav")
+
+    monkeypatch.setattr(main_module, "synthesize_ru", fake_synthesize_ru)
+    monkeypatch.setattr(main_module.config.tts, "chunk_crossfade_ms", 50)
+    monkeypatch.setattr(main_module.config.tts, "chunk_target_dbfs", -18.0)
+
+    output_path = tmp_path / "result_fast.wav"
+    main_module.synthesize_with_splitting("hello world" * 30, "profile.wav", output_path, mode="fast")
+
+    combined = AudioSegment.from_file(output_path)
+
+    assert call_index["value"] == 2
+    expected_length = sum(len(segment) for segment in segments)
+    assert len(combined) == pytest.approx(expected_length, abs=3)
+    assert abs(combined.dBFS - (-18.0)) > 1.5

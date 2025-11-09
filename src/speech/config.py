@@ -91,6 +91,10 @@ class TTSConfig:
     silence_chunk_len: int = 10
     deesser_frequency: int = 6000
     deesser_reduction_db: float = 12.0
+    quality_gpt_conditioning_length: Optional[int] = None
+    quality_reference_duration: Optional[float] = None
+    quality_crossfade_ms: Optional[int] = None
+    quality_target_dbfs: Optional[float] = None
 
 
 @dataclass(slots=True)
@@ -132,6 +136,16 @@ def _get_env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _get_env_optional_int(name: str) -> Optional[int]:
+    value = _get_env(name)
+    return int(value) if value else None
+
+
+def _get_env_optional_float(name: str) -> Optional[float]:
+    value = _get_env(name)
+    return float(value) if value else None
 
 
 def _get_env_path(name: str) -> Optional[Path]:
@@ -224,18 +238,22 @@ def load_config(env_file: Optional[os.PathLike[str] | str] = None) -> AppConfig:
 
     tts_config = TTSConfig(
         language=_get_env("TTS_LANGUAGE", "ru") or "ru",
-        gpt_conditioning_length=(
-            lambda value: int(value) if value else None
-        )(_get_env("TTS_GPT_CONDITION_LENGTH")),
-        reference_duration=(
-            lambda value: float(value) if value else None
-        )(_get_env("TTS_REFERENCE_DURATION")),
+        gpt_conditioning_length=_get_env_optional_int("TTS_GPT_CONDITION_LENGTH"),
+        reference_duration=_get_env_optional_float("TTS_REFERENCE_DURATION"),
         chunk_crossfade_ms=_get_env_int("TTS_CHUNK_CROSSFADE_MS", 75),
         chunk_target_dbfs=_get_env_float("TTS_CHUNK_TARGET_DBFS", -20.0),
         silence_threshold=_get_env_int("TTS_SILENCE_THRESHOLD", -50),
         silence_chunk_len=_get_env_int("TTS_SILENCE_CHUNK_LEN", 10),
         deesser_frequency=_get_env_int("TTS_DEESSER_FREQUENCY", 6000),
         deesser_reduction_db=_get_env_float("TTS_DEESSER_REDUCTION_DB", 12.0),
+        quality_gpt_conditioning_length=_get_env_optional_int(
+            "TTS_QUALITY_GPT_CONDITION_LENGTH"
+        ),
+        quality_reference_duration=_get_env_optional_float(
+            "TTS_QUALITY_REFERENCE_DURATION"
+        ),
+        quality_crossfade_ms=_get_env_optional_int("TTS_QUALITY_CROSSFADE_MS"),
+        quality_target_dbfs=_get_env_optional_float("TTS_QUALITY_TARGET_DBFS"),
     )
 
     return AppConfig(

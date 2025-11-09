@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     state TEXT DEFAULT 'idle',
     profile_path TEXT,
-    current_session INTEGER DEFAULT 0
+    current_session INTEGER DEFAULT 0,
+    pending_tts_text TEXT
 );
 """
 
@@ -38,6 +39,7 @@ async def init_db():
         await db.execute(CREATE_USERS_TABLE)
         await db.execute(CREATE_SAMPLES_TABLE)
         await _ensure_column(db, "users", "current_session", "INTEGER DEFAULT 0")
+        await _ensure_column(db, "users", "pending_tts_text", "TEXT")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_samples_user_session ON samples(user_id, session_id)"
         )
@@ -47,17 +49,24 @@ async def init_db():
 async def get_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT user_id, state, profile_path, current_session FROM users WHERE user_id = ?",
+            """
+            SELECT user_id, state, profile_path, current_session, pending_tts_text
+            FROM users
+            WHERE user_id = ?
+            """,
             (user_id,),
         )
         row = await cursor.fetchone()
         if row is None:
             await db.execute(
-                "INSERT INTO users (user_id, state, profile_path, current_session) VALUES (?, 'idle', NULL, 0)",
+                """
+                INSERT INTO users (user_id, state, profile_path, current_session, pending_tts_text)
+                VALUES (?, 'idle', NULL, 0, NULL)
+                """,
                 (user_id,),
             )
             await db.commit()
-            return (user_id, "idle", None, 0)
+            return (user_id, "idle", None, 0, None)
         return row
 
 
@@ -100,7 +109,7 @@ async def start_user_session(user_id: int) -> int:
 async def get_current_session(user_id: int) -> int:
     """Return the currently active session for the user."""
 
-    _, _, _, current_session = await get_user(user_id)
+    _, _, _, current_session, _ = await get_user(user_id)
     return current_session
 
 
@@ -193,3 +202,22 @@ async def delete_user_samples(user_id: int, session_id: Optional[int] = None) ->
                 (user_id, session_id),
             )
         await db.commit()
+
+
+async def set_pending_tts_text(user_id: int, text: Optional[str]) -> None:
+    """Store or clear the pending text awaiting TTS mode selection."""
+
+    await get_user(user_id)  # ensure user exists
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET pending_tts_text = ? WHERE user_id = ?",
+            (text, user_id),
+        )
+        await db.commit()
+
+
+async def get_pending_tts_text(user_id: int) -> Optional[str]:
+    """Retrieve text awaiting TTS mode selection for the user."""
+
+    _, _, _, _, pending = await get_user(user_id)
+    return pending

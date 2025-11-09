@@ -2,7 +2,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from pydub import AudioSegment
 
@@ -24,8 +24,10 @@ from db import (
     add_sample,
     get_latest_samples,
     delete_user_samples,
+    set_pending_tts_text,
+    get_pending_tts_text,
 )
-from keyboards import main_kb
+from keyboards import main_kb, generation_mode_kb
 from audio_utils import (
     user_voice_dir,
     convert_to_wav,
@@ -42,6 +44,13 @@ from speech.logging import configure_logging, get_logger
 
 SAFE_TEXT_LENGTH = 250
 DEFAULT_CHUNK_LENGTH = 180
+
+GENERATION_STATE_AWAITING_TEXT = "generate"
+GENERATION_STATE_AWAITING_MODE = "generate_mode"
+
+FAST_MODE_COMMANDS = {"fast", "быстро", "⚡", "⚡ быстро", "⚡быстро"}
+QUALITY_MODE_COMMANDS = {"quality", "качество", "🎧", "🎧 качество", "🎧качество"}
+BACK_COMMANDS = {"назад", "⬅️", "⬅️ назад", "back"}
 
 TRAINING_STATE_NEW = "training_new"
 TRAINING_STATE_CONTINUE = "training_continue"
@@ -104,11 +113,15 @@ def split_text_for_tts(text: str, max_chars: int = DEFAULT_CHUNK_LENGTH) -> List
     return chunks
 
 
+GenerationMode = Literal["fast", "quality"]
+
+
 def synthesize_with_splitting(
     text: str,
     profile_path: str,
     out_path: Path,
     *,
+    mode: GenerationMode = "fast",
     language: Optional[str] = None,
     gpt_condition_length: Optional[int] = None,
     reference_duration: Optional[float] = None,
@@ -124,21 +137,68 @@ def synthesize_with_splitting(
     if not chunks:
         raise ValueError("Передан пустой текст для синтеза")
 
+    mode_normalized = mode.lower()
+    if mode_normalized not in {"fast", "quality"}:
+        raise ValueError(f"Unsupported synthesis mode: {mode}")
+
     effective_language = language if language is not None else config.tts.language
-    effective_gpt_condition_length = (
-        gpt_condition_length
-        if gpt_condition_length is not None
-        else config.tts.gpt_conditioning_length
-    )
-    effective_reference_duration = (
-        reference_duration
-        if reference_duration is not None
-        else config.tts.reference_duration
-    )
+
+    if mode_normalized == "quality":
+        effective_gpt_condition_length = (
+            gpt_condition_length
+            if gpt_condition_length is not None
+            else (
+                config.tts.quality_gpt_conditioning_length
+                if config.tts.quality_gpt_conditioning_length is not None
+                else (
+                    config.tts.gpt_conditioning_length
+                    if config.tts.gpt_conditioning_length is not None
+                    else 12
+                )
+            )
+        )
+        effective_reference_duration = (
+            reference_duration
+            if reference_duration is not None
+            else (
+                config.tts.quality_reference_duration
+                if config.tts.quality_reference_duration is not None
+                else config.tts.reference_duration
+            )
+        )
+    else:
+        effective_gpt_condition_length = (
+            gpt_condition_length
+            if gpt_condition_length is not None
+            else config.tts.gpt_conditioning_length
+        )
+        effective_reference_duration = (
+            reference_duration
+            if reference_duration is not None
+            else config.tts.reference_duration
+        )
 
     chunk_kwargs = dict(synthesis_kwargs)
-    chunk_kwargs.setdefault("crossfade_ms", config.tts.chunk_crossfade_ms)
-    chunk_kwargs.setdefault("target_dbfs", config.tts.chunk_target_dbfs)
+    enable_post_processing = mode_normalized == "quality"
+    chunk_kwargs.setdefault("enable_post_processing", enable_post_processing)
+
+    if enable_post_processing:
+        crossfade_default = (
+            config.tts.quality_crossfade_ms
+            if config.tts.quality_crossfade_ms is not None
+            else config.tts.chunk_crossfade_ms
+        )
+        target_dbfs_default = (
+            config.tts.quality_target_dbfs
+            if config.tts.quality_target_dbfs is not None
+            else config.tts.chunk_target_dbfs
+        )
+    else:
+        crossfade_default = 0
+        target_dbfs_default = None
+
+    chunk_kwargs.setdefault("crossfade_ms", crossfade_default)
+    chunk_kwargs.setdefault("target_dbfs", target_dbfs_default)
     chunk_kwargs.setdefault("silence_threshold", config.tts.silence_threshold)
     chunk_kwargs.setdefault("silence_chunk_len", config.tts.silence_chunk_len)
     chunk_kwargs.setdefault("deesser_frequency", config.tts.deesser_frequency)
@@ -179,10 +239,12 @@ def synthesize_with_splitting(
             chunk_segments,
             crossfade_ms=effective_crossfade,
         )
-        combined = normalize_to_target(
-            combined,
-            target_dbfs=chunk_kwargs["target_dbfs"],
-        )
+        target_dbfs = chunk_kwargs["target_dbfs"]
+        if target_dbfs is not None:
+            combined = normalize_to_target(
+                combined,
+                target_dbfs=target_dbfs,
+            )
         combined.export(out_path, format="wav")
     finally:
         for temp_path in temp_paths:
@@ -241,7 +303,7 @@ def _has_saved_voices(user_id: int) -> bool:
 @dp.message(F.text == "🎙 Начать обучение")
 async def start_training(message: Message):
     user_id = message.from_user.id
-    _, state, profile_path, _ = await get_user(user_id)
+    _, state, profile_path, _, _ = await get_user(user_id)
 
     if state in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
@@ -264,7 +326,7 @@ async def start_training(message: Message):
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     user_id = message.from_user.id
-    _, state, _, current_session = await get_user(user_id)
+    _, state, _, current_session, _ = await get_user(user_id)
 
     if state not in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
@@ -311,7 +373,7 @@ async def handle_voice(message: Message):
 @dp.message(F.text == "🛑 Завершить обучение")
 async def finish_training(message: Message):
     user_id = message.from_user.id
-    _, state, _, current_session = await get_user(user_id)
+    _, state, _, current_session, _ = await get_user(user_id)
 
     if state not in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
@@ -348,9 +410,11 @@ async def finish_training(message: Message):
 @dp.message(F.text == "🗣 Сгенерировать")
 async def ask_text(message: Message):
     user_id = message.from_user.id
-    await set_state(user_id, "generate")
+    await set_pending_tts_text(user_id, None)
+    await set_state(user_id, GENERATION_STATE_AWAITING_TEXT)
     await message.answer(
         f"Пришли текст, который нужно озвучить твоим голосом (до {SAFE_TEXT_LENGTH} символов за один запрос)."
+        " После этого выбери режим генерации: быстрый или качественный."
         " Если нужно больше — отправляй по частям или используй пошаговую генерацию."
     )
 
@@ -358,7 +422,7 @@ async def ask_text(message: Message):
 @dp.message(F.text)
 async def handle_text(message: Message):
     user_id = message.from_user.id
-    user_id, state, profile_path, _ = await get_user(user_id)
+    user_id, state, profile_path, _, pending_text = await get_user(user_id)
 
     if state == TRAINING_STATE_SELECT:
         text = (message.text or "").casefold()
@@ -372,8 +436,8 @@ async def handle_text(message: Message):
             )
         return
 
-    # реагируем только если пользователь в режиме генерации
-    if state != "generate":
+    # реагируем только если пользователь в одном из режимов генерации
+    if state not in {GENERATION_STATE_AWAITING_TEXT, GENERATION_STATE_AWAITING_MODE}:
         return
 
     if not profile_path:
@@ -383,14 +447,74 @@ async def handle_text(message: Message):
         await set_state(user_id, "idle")
         return
 
-    text = message.text.strip()
-    if not text:
+    raw_text = (message.text or "").strip()
+
+    if state == GENERATION_STATE_AWAITING_MODE:
+        choice = raw_text.casefold()
+
+        if choice in BACK_COMMANDS:
+            await set_state(user_id, GENERATION_STATE_AWAITING_TEXT)
+            await set_pending_tts_text(user_id, None)
+            await message.answer(
+                f"Хорошо, пришли новый текст до {SAFE_TEXT_LENGTH} символов.",
+                reply_markup=main_kb(),
+            )
+            return
+
+        if choice in FAST_MODE_COMMANDS:
+            mode = "fast"
+        elif choice in QUALITY_MODE_COMMANDS:
+            mode = "quality"
+        else:
+            await message.answer(
+                "Выбери «⚡ Быстро» для мгновенного ответа или «🎧 Качество» для более тщательного синтеза.",
+                reply_markup=generation_mode_kb(),
+            )
+            return
+
+        pending_raw = pending_text or await get_pending_tts_text(user_id)
+        pending = (pending_raw or "").strip()
+        if not pending:
+            await message.answer(
+                "Не нашёл текст для синтеза. Пришли текст ещё раз.",
+                reply_markup=main_kb(),
+            )
+            await set_state(user_id, GENERATION_STATE_AWAITING_TEXT)
+            return
+
+        await set_pending_tts_text(user_id, None)
+
+        out_path = user_output_path(user_id)
+        ogg_path = user_output_ogg_path(user_id)
+        await message.answer(
+            "Генерирую... Помни, что лучше держать отдельные запросы в пределах допустимой длины.",
+            reply_markup=main_kb(),
+        )
+
+        synthesize_with_splitting(pending, profile_path, out_path, mode=mode)
+
+        try:
+            wav_to_ogg_opus(str(out_path), str(ogg_path))
+        except Exception:
+            logger.exception("Failed to convert WAV to OGG/Opus via ffmpeg")
+            await message.answer("не смог перекодировать аудио, проверь ffmpeg/libopus")
+            await set_state(user_id, "idle")
+            return
+
+        voice_file = FSInputFile(str(ogg_path), filename="voice.ogg")
+        await message.answer_voice(voice_file)
+
+        await set_state(user_id, "idle")
+        return
+
+    # state == GENERATION_STATE_AWAITING_TEXT
+    if not raw_text:
         await message.answer(
             f"Текст пустой 🤔 Пришли нормальный текст до {SAFE_TEXT_LENGTH} символов."
         )
         return
 
-    if len(text) > SAFE_TEXT_LENGTH:
+    if len(raw_text) > SAFE_TEXT_LENGTH:
         await message.answer(
             "Сообщение слишком длинное для безопасной генерации."
             f" Пожалуйста, сократи его до {SAFE_TEXT_LENGTH} символов"
@@ -398,28 +522,12 @@ async def handle_text(message: Message):
         )
         return
 
-    out_path = user_output_path(user_id)
-    ogg_path = user_output_ogg_path(user_id)
+    await set_pending_tts_text(user_id, raw_text)
+    await set_state(user_id, GENERATION_STATE_AWAITING_MODE)
     await message.answer(
-        "Генерирую... Помни, что лучше держать отдельные запросы в пределах допустимой длины."
+        "Выбери режим генерации: ⚡ Быстро — минимальная задержка, 🎧 Качество — лучшее звучание.",
+        reply_markup=generation_mode_kb(),
     )
-
-    # синтез
-    synthesize_with_splitting(text, profile_path, out_path)
-
-    try:
-        wav_to_ogg_opus(str(out_path), str(ogg_path))
-    except Exception:
-        logger.exception("Failed to convert WAV to OGG/Opus via ffmpeg")
-        await message.answer("не смог перекодировать аудио, проверь ffmpeg/libopus")
-        await set_state(user_id, "idle")
-        return
-
-    voice_file = FSInputFile(str(ogg_path), filename="voice.ogg")
-    await message.answer_voice(voice_file)
-
-    # вернём в обычный режим
-    await set_state(user_id, "idle")
 
 
 async def main():
