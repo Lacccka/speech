@@ -16,7 +16,16 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import Message, FSInputFile
 
-from db import init_db, get_user, set_state, set_profile
+from db import (
+    init_db,
+    get_user,
+    set_state,
+    set_profile,
+    start_user_session,
+    add_sample,
+    get_latest_samples,
+    delete_user_samples,
+)
 from keyboards import main_kb
 from audio_utils import (
     user_voice_dir,
@@ -144,8 +153,11 @@ async def cmd_start(message: Message):
 
 
 async def _enter_training_mode(message: Message, user_id: int, mode: str) -> None:
+    session_id: int | None = None
     if mode == TRAINING_STATE_NEW:
+        await delete_user_samples(user_id)
         clear_user_voices(user_id)
+        session_id = await start_user_session(user_id)
         await set_state(user_id, TRAINING_STATE_NEW)
         await message.answer(
             "Я очистил предыдущие записи. Присылай новые голосовые подряд. Для стартового обучения отправь хотя бы 5–10"
@@ -155,12 +167,18 @@ async def _enter_training_mode(message: Message, user_id: int, mode: str) -> Non
             " Когда закончишь — нажми «🛑 Завершить обучение»."
         )
     elif mode == TRAINING_STATE_CONTINUE:
+        session_id = await start_user_session(user_id)
         await set_state(user_id, TRAINING_STATE_CONTINUE)
         await message.answer(
             "Принял режим дообучения. Присылай дополнительные голосовые — я добавлю их к тем, что уже сохранены."
             " Лучше всего отправить 5–10 новых сообщений по 5–10 секунд, чтобы обновление прошло заметнее."
             " Когда закончишь — нажми «🛑 Завершить обучение»."
         )
+    else:
+        logger.error("Unknown training mode %s for user %s", mode, user_id)
+        return
+
+    logger.info("Started training session %s for user %s", session_id, user_id)
 
 
 def _has_saved_voices(user_id: int) -> bool:
@@ -171,7 +189,7 @@ def _has_saved_voices(user_id: int) -> bool:
 @dp.message(F.text == "🎙 Начать обучение")
 async def start_training(message: Message):
     user_id = message.from_user.id
-    _, state, profile_path = await get_user(user_id)
+    _, state, profile_path, _ = await get_user(user_id)
 
     if state in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
@@ -194,7 +212,7 @@ async def start_training(message: Message):
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     user_id = message.from_user.id
-    _, state, _ = await get_user(user_id)
+    _, state, _, current_session = await get_user(user_id)
 
     if state not in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
@@ -233,17 +251,26 @@ async def handle_voice(message: Message):
     convert_to_wav(str(ogg_path), str(wav_path))
     ogg_path.unlink(missing_ok=True)
 
+    await add_sample(user_id, str(wav_path), session_id=current_session)
+
     await message.answer("Принял голосовое 👍")
 
 
 @dp.message(F.text == "🛑 Завершить обучение")
 async def finish_training(message: Message):
     user_id = message.from_user.id
-    _, state, _ = await get_user(user_id)
+    _, state, _, current_session = await get_user(user_id)
 
     if state not in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
             "Сейчас обучение не идёт. Сначала нажми «🎙 Начать обучение» и пришли голосовые."
+        )
+        return
+
+    samples = await get_latest_samples(user_id, current_session) if current_session else []
+    if not samples:
+        await message.answer(
+            "Я не нашёл записей. Пришли хотя бы одно голосовое в режиме обучения."
         )
         return
 
@@ -279,7 +306,7 @@ async def ask_text(message: Message):
 @dp.message(F.text)
 async def handle_text(message: Message):
     user_id = message.from_user.id
-    user_id, state, profile_path = await get_user(user_id)
+    user_id, state, profile_path, _ = await get_user(user_id)
 
     if state == TRAINING_STATE_SELECT:
         text = (message.text or "").casefold()
