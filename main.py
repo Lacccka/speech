@@ -1,5 +1,6 @@
 # main.py
 import asyncio
+import re
 import sys
 from pathlib import Path
 from typing import Any, List, Literal, Optional, Sequence
@@ -44,7 +45,43 @@ from speech.config import load_config
 from speech.logging import configure_logging, get_logger
 
 SAFE_TEXT_LENGTH = 250
-DEFAULT_CHUNK_LENGTH = 180
+DEFAULT_CHUNK_LENGTH = 240
+
+_SENTENCE_ENDINGS = {".", "!", "?", "…"}
+_CLOSING_PUNCTUATION = set("\"'”»)]}›")
+_ABBREVIATIONS = {
+    "mr.",
+    "mrs.",
+    "ms.",
+    "dr.",
+    "prof.",
+    "sr.",
+    "jr.",
+    "st.",
+    "vs.",
+    "etc.",
+    "e.g.",
+    "i.e.",
+    "u.s.",
+    "u.k.",
+    "p.m.",
+    "a.m.",
+    "sen.",
+    "rep.",
+    "dept.",
+    "inc.",
+    "ltd.",
+    "co.",
+    "no.",
+    "г.",
+    "ул.",
+    "д.",
+    "т.д.",
+    "т.п.",
+    "рис.",
+    "стр.",
+}
+_INITIALISM_RE = re.compile(r"^(?:[A-Za-zА-Яа-я]\.){2,}$")
 
 GENERATION_STATE_AWAITING_TEXT = "generate"
 GENERATION_STATE_AWAITING_MODE = "generate_mode"
@@ -71,39 +108,178 @@ dp = Dispatcher()
 
 def split_text_for_tts(text: str, max_chars: int = DEFAULT_CHUNK_LENGTH) -> List[str]:
     """
-    Делит текст на части, стараясь не превышать max_chars и не разбивать слова.
+    Делит текст на части, стараясь учитывать границы предложений и ограничение по длине.
     """
 
-    chunks: List[str] = []
-    buffer: List[str] = []
+    def _normalize_token(token: str) -> str:
+        return token.lower().strip("\"'“”«»()[]{}")
 
-    def flush_buffer() -> None:
-        if buffer:
-            combined = " ".join(buffer).strip()
-            if combined:
-                chunks.append(combined)
-            buffer.clear()
+    def _is_probable_abbreviation(token: str) -> bool:
+        normalized = _normalize_token(token)
+        if not normalized:
+            return False
+        if normalized in _ABBREVIATIONS:
+            return True
+        if _INITIALISM_RE.match(normalized):
+            return True
+        if normalized.endswith(".") and len(normalized.rstrip(".")) == 1:
+            return True
+        return False
 
-    for paragraph in text.splitlines():
-        paragraph = paragraph.strip()
-        if not paragraph:
-            flush_buffer()
-            continue
+    def _split_oversized_token(token: str) -> List[str]:
+        return [token[i : i + max_chars] for i in range(0, len(token), max_chars)]
 
-        words = paragraph.split()
-        for word in words:
-            if not buffer:
-                buffer.append(word)
+    def _split_long_segment(segment: str) -> List[str]:
+        stripped = segment.strip()
+        if not stripped:
+            return []
+        tokens = stripped.split()
+        if not tokens:
+            return _split_oversized_token(stripped)
+
+        parts: List[str] = []
+        current = ""
+
+        for token in tokens:
+            if len(token) > max_chars:
+                if current:
+                    parts.append(current.strip())
+                    current = ""
+                oversized = _split_oversized_token(token)
+                for piece in oversized[:-1]:
+                    parts.append(piece)
+                last_piece = oversized[-1]
+                if len(last_piece) == max_chars:
+                    parts.append(last_piece)
+                    current = ""
+                else:
+                    current = last_piece
                 continue
 
-            prospective = f"{' '.join(buffer)} {word}"
-            if len(prospective) <= max_chars:
-                buffer.append(word)
-            else:
-                flush_buffer()
-                buffer.append(word)
+            if not current:
+                current = token
+                continue
 
-    flush_buffer()
+            prospective = f"{current} {token}"
+            if len(prospective) <= max_chars:
+                current = prospective
+            else:
+                parts.append(current.strip())
+                current = token
+
+        if current:
+            parts.append(current.strip())
+        return parts
+
+    def _split_paragraph_into_sentences(paragraph: str) -> List[str]:
+        sentences: List[str] = []
+        start = 0
+        length = len(paragraph)
+        i = 0
+
+        while i < length:
+            char = paragraph[i]
+            if char in _SENTENCE_ENDINGS:
+                next_char = paragraph[i + 1] if i + 1 < length else ""
+                prev_char = paragraph[i - 1] if i - 1 >= 0 else ""
+
+                if char == ".":
+                    if next_char == ".":
+                        i += 1
+                        continue
+                    if prev_char.isdigit() and next_char.isdigit():
+                        i += 1
+                        continue
+
+                end = i + 1
+                while end < length and paragraph[end] in _CLOSING_PUNCTUATION:
+                    end += 1
+
+                segment = paragraph[start:end].strip()
+                if not segment:
+                    start = end
+                    i = end
+                    continue
+
+                last_token = segment.split()[-1] if segment.split() else ""
+                if char == "." and _is_probable_abbreviation(last_token):
+                    i += 1
+                    continue
+
+                sentences.append(segment)
+                start = end
+                while start < length and paragraph[start].isspace():
+                    start += 1
+                i = start
+                continue
+
+            i += 1
+
+        tail = paragraph[start:].strip()
+        if tail:
+            sentences.append(tail)
+        return sentences
+
+    preferred_min = 200 if max_chars >= 200 else max_chars
+    chunks: List[str] = []
+    current_chunk = ""
+
+    def _flush_current() -> None:
+        nonlocal current_chunk
+        chunk = current_chunk.strip()
+        if chunk:
+            chunks.append(chunk)
+        current_chunk = ""
+
+    for raw_paragraph in text.splitlines():
+        paragraph = raw_paragraph.strip()
+        if not paragraph:
+            _flush_current()
+            continue
+
+        sentences = _split_paragraph_into_sentences(paragraph)
+        if not sentences:
+            sentences = [paragraph]
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            if len(sentence) > max_chars:
+                long_parts = _split_long_segment(sentence)
+                if current_chunk:
+                    _flush_current()
+                if not long_parts:
+                    continue
+                chunks.extend(part.strip() for part in long_parts[:-1])
+                current_chunk = long_parts[-1].strip()
+                if len(current_chunk) > max_chars:
+                    for part in _split_long_segment(current_chunk):
+                        chunks.append(part.strip())
+                    current_chunk = ""
+                continue
+
+            if not current_chunk:
+                current_chunk = sentence
+                continue
+
+            prospective = f"{current_chunk} {sentence}"
+            if len(prospective) <= max_chars:
+                current_chunk = prospective
+                continue
+
+            if len(current_chunk) < preferred_min and len(sentence) < preferred_min:
+                merged_parts = _split_long_segment(prospective)
+                if len(merged_parts) > 1:
+                    chunks.extend(part.strip() for part in merged_parts[:-1])
+                    current_chunk = merged_parts[-1].strip()
+                    continue
+
+            _flush_current()
+            current_chunk = sentence
+
+    _flush_current()
 
     if not chunks:
         stripped = text.strip()

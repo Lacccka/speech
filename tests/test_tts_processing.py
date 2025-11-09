@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -150,6 +151,59 @@ sys.modules.setdefault("dotenv", fake_dotenv)
 
 import tts_engine
 from speech.config import TTSConfig
+
+
+def _load_main(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    if "main" in sys.modules:
+        return importlib.reload(sys.modules["main"])
+    return importlib.import_module("main")
+
+
+def test_split_text_prefers_sentence_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_module = _load_main(monkeypatch)
+    sentences = [
+        "This is the first sentence that includes several descriptive clauses to create a comfortable length for testing purposes.",
+        "Meanwhile, the second sentence elaborates on the scenario with enough wording to approach our target boundary.",
+        "Finally, the third sentence wraps things up by providing a short conclusion that should stay grouped with the second when limits are respected.",
+    ]
+    text = " ".join(sentences)
+
+    chunks = main_module.split_text_for_tts(text, max_chars=240)
+
+    assert chunks == [f"{sentences[0]} {sentences[1]}", sentences[2]]
+    assert all(len(chunk) <= 240 for chunk in chunks)
+    assert len(chunks[0]) >= 200
+
+
+def test_split_text_handles_abbreviations(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_module = _load_main(monkeypatch)
+    text = (
+        "Dr. Smith met with Sen. Johnson at 5 p.m. to discuss the U.S. launch schedule. "
+        "The meeting was productive and ended on time."
+    )
+
+    chunks = main_module.split_text_for_tts(text, max_chars=240)
+
+    assert chunks == [text]
+
+
+def test_split_text_uses_token_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_module = _load_main(monkeypatch)
+    text = " ".join(["segment"] * 80)
+
+    chunks = main_module.split_text_for_tts(text, max_chars=240)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 240 for chunk in chunks)
+    assert all(chunk == chunk.strip() for chunk in chunks)
+
+    original_tokens = text.split()
+    reconstructed_tokens: list[str] = []
+    for chunk in chunks:
+        reconstructed_tokens.extend(chunk.split())
+
+    assert reconstructed_tokens == original_tokens
 
 
 def _dummy_backend_factory(tts_config: TTSConfig) -> object:
