@@ -231,6 +231,53 @@ def _build_segment(
     )
 
 
+def test_synthesize_to_file_fills_missing_speaker_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_calls: list[dict[str, object]] = []
+
+    class _DummySynthesizer:
+        def __init__(self) -> None:
+            self._wav_token = object()
+
+        def tts(self, **kwargs: object) -> object:
+            captured_calls.append(dict(kwargs))
+            return self._wav_token
+
+        def save_wav(self, wav: object, path: str) -> None:  # pragma: no cover - helper stub
+            assert wav is self._wav_token
+            AudioSegment.silent(duration=50).export(path, format="wav")
+
+    synthesizer = _DummySynthesizer()
+    monkeypatch.setattr(tts_engine, "_synthesizer", synthesizer)
+
+    speaker_reference = tmp_path / "user_profile.wav"
+    result = tts_engine._synthesize_to_file(
+        "hello",
+        [str(speaker_reference)],
+        str(tmp_path / "out.wav"),
+        language=None,
+        gpt_cond_len=None,
+        reference_duration=None,
+        extra_options={},
+    )
+
+    assert isinstance(result, AudioSegment)
+    assert captured_calls, "Synthesizer.tts was not invoked"
+
+    call_kwargs = captured_calls[0]
+    expected_identifier = speaker_reference.stem
+
+    speaker_value = call_kwargs.get("speaker")
+    speaker_id_value = call_kwargs.get("speaker_id")
+
+    assert speaker_value == expected_identifier or speaker_id_value == expected_identifier
+    if speaker_value is not None:
+        assert str(speaker_value).strip()
+    if speaker_id_value is not None:
+        assert str(speaker_id_value).strip()
+
+
 def test_synthesize_ru_applies_processing_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     raw_segments = [
         _build_segment(200, silence_before=40, silence_after=40, gain_db=-6.0),

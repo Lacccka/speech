@@ -347,9 +347,13 @@ def _synthesize_to_file(
         "split_sentences": False,
     }
 
+    speaker_identifier: Optional[str] = None
     if speaker_wavs:
         # Некоторые версии XTTS по-прежнему ожидают ``speaker_wav`` с одиночным путём.
         synthesis_args.setdefault("speaker_wav", speaker_wavs[0])
+
+        first_reference = Path(speaker_wavs[0])
+        speaker_identifier = first_reference.stem or first_reference.name or "speaker"
 
     if language:
         synthesis_args["language_name"] = language
@@ -359,6 +363,18 @@ def _synthesize_to_file(
         synthesis_args["reference_duration"] = reference_duration
 
     synthesis_args.update(extra_options)
+
+    if speaker_identifier:
+        for key in ("speaker", "speaker_id"):
+            if key not in synthesis_args:
+                synthesis_args[key] = speaker_identifier
+                continue
+
+            current_value = synthesis_args[key]
+            if current_value is None:
+                synthesis_args[key] = speaker_identifier
+            elif isinstance(current_value, str) and not current_value.strip():
+                synthesis_args[key] = speaker_identifier
 
     wav = synthesizer.tts(**synthesis_args)
     synthesizer.save_wav(wav=wav, path=out_wav)
