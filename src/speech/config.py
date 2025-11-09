@@ -79,6 +79,15 @@ class InferenceConfig:
 
 
 @dataclass(slots=True)
+class TTSConfig:
+    """Configuration options for the XTTS synthesizer."""
+
+    language: str = "ru"
+    gpt_conditioning_length: Optional[int] = None
+    reference_duration: Optional[float] = None
+
+
+@dataclass(slots=True)
 class AppConfig:
     """Container for application configuration."""
 
@@ -88,6 +97,7 @@ class AppConfig:
     model: ModelConfig
     training: TrainingConfig
     inference: InferenceConfig
+    tts: TTSConfig
 
 
 def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -206,6 +216,16 @@ def load_config(env_file: Optional[os.PathLike[str] | str] = None) -> AppConfig:
         streaming_chunk_seconds=_get_env_float("INFER_STREAM_CHUNK_SEC", 2.0),
     )
 
+    tts_config = TTSConfig(
+        language=_get_env("TTS_LANGUAGE", "ru") or "ru",
+        gpt_conditioning_length=(
+            lambda value: int(value) if value else None
+        )(_get_env("TTS_GPT_CONDITION_LENGTH")),
+        reference_duration=(
+            lambda value: float(value) if value else None
+        )(_get_env("TTS_REFERENCE_DURATION")),
+    )
+
     return AppConfig(
         bot=BotConfig(token=token),
         project_root=Path.cwd(),
@@ -213,5 +233,6 @@ def load_config(env_file: Optional[os.PathLike[str] | str] = None) -> AppConfig:
         model=model_config,
         training=training_config,
         inference=inference_config,
+        tts=tts_config,
     )
 

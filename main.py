@@ -2,7 +2,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from typing import List
+from typing import Any, List, Optional
 
 from pydub import AudioSegment
 from pydub.effects import normalize
@@ -105,7 +105,16 @@ def split_text_for_tts(text: str, max_chars: int = DEFAULT_CHUNK_LENGTH) -> List
     return chunks
 
 
-def synthesize_with_splitting(text: str, profile_path: str, out_path: Path) -> None:
+def synthesize_with_splitting(
+    text: str,
+    profile_path: str,
+    out_path: Path,
+    *,
+    language: Optional[str] = None,
+    gpt_condition_length: Optional[int] = None,
+    reference_duration: Optional[float] = None,
+    **synthesis_kwargs: Any,
+) -> None:
     """
     Вызывает синтез с дроблением длинного текста и объединяет WAV-файлы.
     """
@@ -116,8 +125,28 @@ def synthesize_with_splitting(text: str, profile_path: str, out_path: Path) -> N
     if not chunks:
         raise ValueError("Передан пустой текст для синтеза")
 
+    effective_language = language if language is not None else config.tts.language
+    effective_gpt_condition_length = (
+        gpt_condition_length
+        if gpt_condition_length is not None
+        else config.tts.gpt_conditioning_length
+    )
+    effective_reference_duration = (
+        reference_duration
+        if reference_duration is not None
+        else config.tts.reference_duration
+    )
+
     if len(chunks) == 1:
-        synthesize_ru(chunks[0], profile_path, str(out_path))
+        synthesize_ru(
+            chunks[0],
+            profile_path,
+            str(out_path),
+            language=effective_language,
+            gpt_cond_len=effective_gpt_condition_length,
+            reference_duration=effective_reference_duration,
+            **synthesis_kwargs,
+        )
         return
 
     temp_paths: List[Path] = []
@@ -126,7 +155,15 @@ def synthesize_with_splitting(text: str, profile_path: str, out_path: Path) -> N
     try:
         for idx, chunk in enumerate(chunks):
             temp_path = out_path.with_name(f"{out_path.stem}_part{idx}.wav")
-            synthesize_ru(chunk, profile_path, str(temp_path))
+            synthesize_ru(
+                chunk,
+                profile_path,
+                str(temp_path),
+                language=effective_language,
+                gpt_cond_len=effective_gpt_condition_length,
+                reference_duration=effective_reference_duration,
+                **synthesis_kwargs,
+            )
             temp_paths.append(temp_path)
             combined += AudioSegment.from_wav(temp_path)
 
