@@ -1,5 +1,7 @@
 # audio_utils.py
 from pathlib import Path
+from typing import List, Optional, Sequence
+
 from pydub import AudioSegment
 from pydub.effects import normalize
 
@@ -64,24 +66,60 @@ def wav_to_ogg_opus(src: str, dst: str):
     )
 
 
-def merge_user_voices(user_id: int, profile_path: Path):
-    """
-    Склеиваем все wav пользователя в один и сохраняем как профиль.
-    """
+def merge_user_voices(
+    user_id: int,
+    profile_dir: Path,
+    *,
+    selected_clips: Optional[Sequence[Path | str]] = None,
+    max_references: int = 3,
+) -> List[str]:
+    """Подбирает до ``max_references`` лучших клипов и сохраняет их как эталон."""
+
     voice_dir = user_voice_dir(user_id)
-    parts = sorted(voice_dir.glob("*.wav"))
+    available_parts = sorted(voice_dir.glob("*.wav"))
+    if not available_parts:
+        return []
+
+    if selected_clips:
+        normalised: List[Path] = []
+        for clip in selected_clips:
+            clip_path = Path(clip)
+            if not clip_path.is_absolute():
+                clip_path = voice_dir / clip_path
+            if clip_path.exists():
+                normalised.append(clip_path)
+        parts = normalised[:max_references]
+    else:
+        scored: List[tuple[Path, int]] = []
+        for part in available_parts:
+            try:
+                audio = AudioSegment.from_wav(part)
+            except Exception:
+                continue
+            scored.append((part, len(audio)))
+
+        if not scored:
+            return []
+
+        scored.sort(key=lambda item: item[1], reverse=True)
+        parts = [path for path, _ in scored[:max_references]]
+
     if not parts:
-        return None
+        return []
 
-    combined = AudioSegment.empty()
-    for part in parts:
-        audio = AudioSegment.from_wav(part)
-        combined += audio
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    curated_paths: List[str] = []
+    for idx, part in enumerate(parts, start=1):
+        try:
+            audio = AudioSegment.from_wav(part)
+        except Exception:
+            continue
+        processed = normalize(audio)
+        target_path = profile_dir / f"reference_{idx}.wav"
+        processed.export(target_path, format="wav")
+        curated_paths.append(str(target_path))
 
-    combined = normalize(combined)
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    combined.export(profile_path, format="wav")
-    return str(profile_path)
+    return curated_paths
 
 
 def clear_user_voices(user_id: int):

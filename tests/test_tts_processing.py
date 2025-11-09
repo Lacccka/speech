@@ -114,12 +114,14 @@ fake_db.init_db = _noop
 fake_db.get_user = _noop
 fake_db.set_state = _noop
 fake_db.set_profile = _noop
+fake_db.set_speaker_references = _noop
 fake_db.start_user_session = _noop
 fake_db.add_sample = _noop
 fake_db.get_latest_samples = lambda *args, **kwargs: []
 fake_db.delete_user_samples = _noop
 fake_db.set_pending_tts_text = _noop
 fake_db.get_pending_tts_text = lambda *args, **kwargs: None
+fake_db.get_speaker_references = lambda *args, **kwargs: []
 
 sys.modules.setdefault("db", fake_db)
 
@@ -138,8 +140,8 @@ fake_audio_utils.wav_to_ogg_opus = _noop
 sys.modules.setdefault("audio_utils", fake_audio_utils)
 
 fake_training = types.ModuleType("training")
-fake_training.continue_training = _noop
-fake_training.train_new_voice = _noop
+fake_training.continue_training = lambda *args, **kwargs: ["ref.wav"]
+fake_training.train_new_voice = lambda *args, **kwargs: ["ref.wav"]
 sys.modules.setdefault("training", fake_training)
 
 fake_dotenv = types.ModuleType("dotenv")
@@ -191,7 +193,7 @@ def test_synthesize_ru_applies_processing_pipeline(tmp_path: Path, monkeypatch: 
 
     tts_engine.synthesize_ru(
         "x" * 400,
-        "profile.wav",
+        ["profile.wav"],
         str(output_path),
         crossfade_ms=80,
         target_dbfs=-14.0,
@@ -257,7 +259,9 @@ def test_main_synthesize_with_splitting_crossfade(tmp_path: Path, monkeypatch: p
 
     call_index = {"value": 0}
 
-    def fake_synthesize_ru(text: str, profile_path: str, out_path: str, **kwargs: object) -> None:
+    def fake_synthesize_ru(
+        text: str, speaker_wavs: object, out_path: str, **kwargs: object
+    ) -> None:
         segment = segments[call_index["value"]]
         call_index["value"] += 1
         segment.export(out_path, format="wav")
@@ -269,7 +273,7 @@ def test_main_synthesize_with_splitting_crossfade(tmp_path: Path, monkeypatch: p
     output_path = tmp_path / "result.wav"
     main_module.synthesize_with_splitting(
         "hello world" * 30,
-        "profile.wav",
+        ["profile.wav"],
         output_path,
         mode="quality",
     )
@@ -303,7 +307,9 @@ def test_main_synthesize_with_splitting_fast_mode(tmp_path: Path, monkeypatch: p
 
     call_index = {"value": 0}
 
-    def fake_synthesize_ru(text: str, profile_path: str, out_path: str, **kwargs: object) -> None:
+    def fake_synthesize_ru(
+        text: str, speaker_wavs: object, out_path: str, **kwargs: object
+    ) -> None:
         segment = segments[call_index["value"]]
         call_index["value"] += 1
         segment.export(out_path, format="wav")
@@ -313,7 +319,12 @@ def test_main_synthesize_with_splitting_fast_mode(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(main_module.config.tts, "chunk_target_dbfs", -18.0)
 
     output_path = tmp_path / "result_fast.wav"
-    main_module.synthesize_with_splitting("hello world" * 30, "profile.wav", output_path, mode="fast")
+    main_module.synthesize_with_splitting(
+        "hello world" * 30,
+        ["profile.wav"],
+        output_path,
+        mode="fast",
+    )
 
     combined = AudioSegment.from_file(output_path)
 

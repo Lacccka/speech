@@ -1,5 +1,5 @@
 # db.py
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import aiosqlite
 
@@ -12,6 +12,17 @@ CREATE TABLE IF NOT EXISTS users (
     profile_path TEXT,
     current_session INTEGER DEFAULT 0,
     pending_tts_text TEXT
+);
+"""
+
+CREATE_SPEAKER_REFERENCES_TABLE = """
+CREATE TABLE IF NOT EXISTS speaker_references (
+    reference_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 """
 
@@ -38,10 +49,17 @@ async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_USERS_TABLE)
         await db.execute(CREATE_SAMPLES_TABLE)
+        await db.execute(CREATE_SPEAKER_REFERENCES_TABLE)
         await _ensure_column(db, "users", "current_session", "INTEGER DEFAULT 0")
         await _ensure_column(db, "users", "pending_tts_text", "TEXT")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_samples_user_session ON samples(user_id, session_id)"
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_speaker_refs_user_position
+            ON speaker_references(user_id, position, reference_id)
+            """
         )
         await db.commit()
 
@@ -78,13 +96,14 @@ async def set_state(user_id: int, state: str):
         await db.commit()
 
 
-async def set_profile(user_id: int, profile_path: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET profile_path = ? WHERE user_id = ?",
-            (profile_path, user_id),
-        )
-        await db.commit()
+async def set_profile(user_id: int, profile_path: Sequence[str] | str):
+    """Backward compatible wrapper for ``set_speaker_references``."""
+
+    if isinstance(profile_path, str):
+        references: Sequence[str] = [profile_path]
+    else:
+        references = profile_path
+    await set_speaker_references(user_id, references)
 
 
 async def start_user_session(user_id: int) -> int:
@@ -201,7 +220,7 @@ async def delete_user_samples(user_id: int, session_id: Optional[int] = None) ->
                 "DELETE FROM samples WHERE user_id = ? AND session_id = ?",
                 (user_id, session_id),
             )
-        await db.commit()
+    await db.commit()
 
 
 async def set_pending_tts_text(user_id: int, text: Optional[str]) -> None:
@@ -221,3 +240,135 @@ async def get_pending_tts_text(user_id: int) -> Optional[str]:
 
     _, _, _, _, pending = await get_user(user_id)
     return pending
+
+
+async def get_speaker_references(user_id: int) -> List[str]:
+    """Return curated reference file paths for ``user_id``."""
+
+    await get_user(user_id)  # ensure user exists
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT file_path
+            FROM speaker_references
+            WHERE user_id = ?
+            ORDER BY position, reference_id
+            """,
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
+
+def _normalise_references(references: Sequence[str]) -> List[str]:
+    return [ref for ref in (ref.strip() for ref in references) if ref]
+
+
+async def _resequence_positions(
+    db: aiosqlite.Connection, user_id: int
+) -> Optional[str]:
+    cursor = await db.execute(
+        """
+        SELECT reference_id, file_path
+        FROM speaker_references
+        WHERE user_id = ?
+        ORDER BY position, reference_id
+        """,
+        (user_id,),
+    )
+    rows = await cursor.fetchall()
+    for new_pos, (reference_id, _) in enumerate(rows):
+        await db.execute(
+            "UPDATE speaker_references SET position = ? WHERE reference_id = ?",
+            (new_pos, reference_id),
+        )
+    first_path = rows[0][1] if rows else None
+    await db.execute(
+        "UPDATE users SET profile_path = ? WHERE user_id = ?",
+        (first_path, user_id),
+    )
+    return first_path
+
+
+async def set_speaker_references(user_id: int, references: Sequence[str]) -> None:
+    """Replace stored speaker references for ``user_id``."""
+
+    normalised = _normalise_references(references)
+    await get_user(user_id)  # ensure user exists
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM speaker_references WHERE user_id = ?", (user_id,))
+        for position, ref in enumerate(normalised):
+            await db.execute(
+                """
+                INSERT INTO speaker_references (user_id, file_path, position)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, ref, position),
+            )
+        if normalised:
+            first_path = normalised[0]
+        else:
+            first_path = None
+        await db.execute(
+            "UPDATE users SET profile_path = ? WHERE user_id = ?",
+            (first_path, user_id),
+        )
+        await db.commit()
+
+
+async def add_speaker_reference(
+    user_id: int, file_path: str, *, position: Optional[int] = None
+) -> int:
+    """Add a single speaker reference and return its identifier."""
+
+    await get_user(user_id)  # ensure user exists
+    cleaned = file_path.strip()
+    if not cleaned:
+        raise ValueError("file_path must not be empty")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        if position is None:
+            cursor = await db.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM speaker_references WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            position = row[0] if row and row[0] is not None else 0
+
+        cursor = await db.execute(
+            """
+            INSERT INTO speaker_references (user_id, file_path, position)
+            VALUES (?, ?, ?)
+            """,
+            (user_id, cleaned, position),
+        )
+        await _resequence_positions(db, user_id)
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def remove_speaker_reference(
+    user_id: int,
+    *,
+    file_path: Optional[str] = None,
+    reference_id: Optional[int] = None,
+) -> None:
+    """Remove stored references either by ``file_path`` or ``reference_id``."""
+
+    if file_path is None and reference_id is None:
+        raise ValueError("Either file_path or reference_id must be provided")
+
+    await get_user(user_id)  # ensure user exists
+    async with aiosqlite.connect(DB_PATH) as db:
+        if reference_id is not None:
+            await db.execute(
+                "DELETE FROM speaker_references WHERE user_id = ? AND reference_id = ?",
+                (user_id, reference_id),
+            )
+        else:
+            await db.execute(
+                "DELETE FROM speaker_references WHERE user_id = ? AND file_path = ?",
+                (user_id, file_path.strip()),
+            )
+        await _resequence_positions(db, user_id)
+        await db.commit()

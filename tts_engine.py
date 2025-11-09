@@ -212,7 +212,7 @@ def _get_synthesizer() -> Any:
 
 def _synthesize_to_file(
     text: str,
-    profile_wav: str,
+    speaker_wavs: Sequence[str],
     out_wav: str,
     *,
     language: Optional[str],
@@ -223,9 +223,13 @@ def _synthesize_to_file(
     synthesizer = _get_synthesizer()
     synthesis_args: Dict[str, Any] = {
         "text": text,
-        "speaker_wav": profile_wav,
+        "speaker_wavs": list(speaker_wavs),
         "split_sentences": False,
     }
+
+    if speaker_wavs:
+        # Некоторые версии XTTS по-прежнему ожидают ``speaker_wav`` с одиночным путём.
+        synthesis_args.setdefault("speaker_wav", speaker_wavs[0])
 
     if language:
         synthesis_args["language_name"] = language
@@ -244,7 +248,7 @@ def _synthesize_to_file(
 
 def synthesize_ru(
     text: str,
-    profile_wav: str,
+    speaker_wavs: Sequence[str] | str,
     out_wav: str,
     *,
     language: Optional[str] = "ru",
@@ -259,6 +263,15 @@ def synthesize_ru(
     enable_post_processing: bool = True,
     **extra_options: Any,
 ) -> None:
+    speaker_list: List[str]
+    if isinstance(speaker_wavs, str):
+        speaker_list = [speaker_wavs]
+    else:
+        speaker_list = list(speaker_wavs)
+
+    if not speaker_list:
+        raise ValueError("speaker_wavs must contain at least one reference")
+
     def _process_segment(segment: AudioSegment) -> AudioSegment:
         if not enable_post_processing:
             return segment
@@ -280,7 +293,7 @@ def synthesize_ru(
     if len(text) <= 250:
         segment = _synthesize_to_file(
             text,
-            profile_wav,
+            speaker_list,
             out_wav,
             language=language,
             gpt_cond_len=gpt_cond_len,
@@ -300,7 +313,7 @@ def synthesize_ru(
             chunk_path = tmp_path / f"chunk_{idx}.wav"
             raw_segment = _synthesize_to_file(
                 chunk,
-                profile_wav,
+                speaker_list,
                 str(chunk_path),
                 language=language,
                 gpt_cond_len=gpt_cond_len,

@@ -2,7 +2,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Sequence
 
 from pydub import AudioSegment
 
@@ -19,13 +19,14 @@ from db import (
     init_db,
     get_user,
     set_state,
-    set_profile,
+    set_speaker_references,
     start_user_session,
     add_sample,
     get_latest_samples,
     delete_user_samples,
     set_pending_tts_text,
     get_pending_tts_text,
+    get_speaker_references,
 )
 from keyboards import main_kb, generation_mode_kb
 from audio_utils import (
@@ -118,7 +119,7 @@ GenerationMode = Literal["fast", "quality"]
 
 def synthesize_with_splitting(
     text: str,
-    profile_path: str,
+    speaker_references: Sequence[str] | str,
     out_path: Path,
     *,
     mode: GenerationMode = "fast",
@@ -207,7 +208,7 @@ def synthesize_with_splitting(
     if len(chunks) == 1:
         synthesize_ru(
             chunks[0],
-            profile_path,
+            speaker_references,
             str(out_path),
             language=effective_language,
             gpt_cond_len=effective_gpt_condition_length,
@@ -224,7 +225,7 @@ def synthesize_with_splitting(
             temp_path = out_path.with_name(f"{out_path.stem}_part{idx}.wav")
             synthesize_ru(
                 chunk,
-                profile_path,
+                speaker_references,
                 str(temp_path),
                 language=effective_language,
                 gpt_cond_len=effective_gpt_condition_length,
@@ -304,6 +305,7 @@ def _has_saved_voices(user_id: int) -> bool:
 async def start_training(message: Message):
     user_id = message.from_user.id
     _, state, profile_path, _, _ = await get_user(user_id)
+    existing_references = await get_speaker_references(user_id)
 
     if state in {TRAINING_STATE_NEW, TRAINING_STATE_CONTINUE}:
         await message.answer(
@@ -311,7 +313,7 @@ async def start_training(message: Message):
         )
         return
 
-    if _has_saved_voices(user_id) or profile_path:
+    if _has_saved_voices(user_id) or existing_references or profile_path:
         await set_state(user_id, TRAINING_STATE_SELECT)
         await message.answer(
             "У тебя уже есть записи. Выбери режим: напиши «Новое обучение», чтобы начать заново (старые записи удалю)"
@@ -389,17 +391,17 @@ async def finish_training(message: Message):
         return
 
     if state == TRAINING_STATE_NEW:
-        merged = train_new_voice(user_id)
+        references = train_new_voice(user_id)
     else:
-        merged = continue_training(user_id)
+        references = continue_training(user_id)
 
-    if not merged:
+    if not references:
         await message.answer(
             "Я не нашёл записей. Пришли хотя бы одно голосовое в режиме обучения."
         )
         return
 
-    await set_profile(user_id, merged)
+    await set_speaker_references(user_id, references)
     await set_state(user_id, "idle")
 
     await message.answer(
@@ -423,6 +425,7 @@ async def ask_text(message: Message):
 async def handle_text(message: Message):
     user_id = message.from_user.id
     user_id, state, profile_path, _, pending_text = await get_user(user_id)
+    speaker_references = await get_speaker_references(user_id)
 
     if state == TRAINING_STATE_SELECT:
         text = (message.text or "").casefold()
@@ -440,7 +443,7 @@ async def handle_text(message: Message):
     if state not in {GENERATION_STATE_AWAITING_TEXT, GENERATION_STATE_AWAITING_MODE}:
         return
 
-    if not profile_path:
+    if not speaker_references:
         await message.answer(
             "У тебя нет профиля голоса. Сначала обучи меня голосовыми."
         )
@@ -491,7 +494,7 @@ async def handle_text(message: Message):
             reply_markup=main_kb(),
         )
 
-        synthesize_with_splitting(pending, profile_path, out_path, mode=mode)
+        synthesize_with_splitting(pending, speaker_references, out_path, mode=mode)
 
         try:
             wav_to_ogg_opus(str(out_path), str(ogg_path))
