@@ -22,3 +22,15 @@ def generation_mode_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+def training_selection_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Новое обучение")],
+            [KeyboardButton(text="Дообучить/Продолжить обучение")],
+            [KeyboardButton(text="⬅️ Назад")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )

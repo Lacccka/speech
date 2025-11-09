@@ -29,7 +29,7 @@ from db import (
     get_pending_tts_text,
     get_speaker_references,
 )
-from keyboards import main_kb, generation_mode_kb
+from keyboards import main_kb, generation_mode_kb, training_selection_kb
 from audio_utils import (
     user_voice_dir,
     convert_to_wav,
@@ -95,7 +95,12 @@ TRAINING_STATE_CONTINUE = "training_continue"
 TRAINING_STATE_SELECT = "training_select"
 
 TRAINING_MODE_NEW_COMMANDS = {"новое обучение", "начать заново", "новое"}
-TRAINING_MODE_CONTINUE_COMMANDS = {"продолжить обучение", "дообучить", "продолжить"}
+TRAINING_MODE_CONTINUE_COMMANDS = {
+    "продолжить обучение",
+    "дообучить",
+    "продолжить",
+    "дообучить/продолжить обучение",
+}
 
 
 configure_logging()
@@ -455,7 +460,8 @@ async def _enter_training_mode(message: Message, user_id: int, mode: str) -> Non
             " сообщений длиной 5–10 секунд, а для стабильного результата собери 20–60 минут чистых записей одним голосом:"
             " короткие сегменты по 2–10 секунд в одинаковых условиях (ровная тональность, без шумов, один и тот же"
             " микрофон). Записи можно накапливать и использовать позже для дообучения."
-            " Когда закончишь — нажми «🛑 Завершить обучение»."
+            " Когда закончишь — нажми «🛑 Завершить обучение».",
+            reply_markup=main_kb(),
         )
     elif mode == TRAINING_STATE_CONTINUE:
         session_id = await start_user_session(user_id)
@@ -463,7 +469,8 @@ async def _enter_training_mode(message: Message, user_id: int, mode: str) -> Non
         await message.answer(
             "Принял режим дообучения. Присылай дополнительные голосовые — я добавлю их к тем, что уже сохранены."
             " Лучше всего отправить 5–10 новых сообщений по 5–10 секунд, чтобы обновление прошло заметнее."
-            " Когда закончишь — нажми «🛑 Завершить обучение»."
+            " Когда закончишь — нажми «🛑 Завершить обучение».",
+            reply_markup=main_kb(),
         )
     else:
         logger.error("Unknown training mode %s for user %s", mode, user_id)
@@ -492,13 +499,49 @@ async def start_training(message: Message):
     if _has_saved_voices(user_id) or existing_references or profile_path:
         await set_state(user_id, TRAINING_STATE_SELECT)
         await message.answer(
-            "У тебя уже есть записи. Выбери режим: напиши «Новое обучение», чтобы начать заново (старые записи удалю)"
-            " и снова собрать 5–10 стартовых голосовых, или «Дообучить»/«Продолжить обучение», чтобы добавить новые"
-            " образцы к уже сохранённым."
+            "У тебя уже есть записи. Выбери режим обучения с помощью кнопок ниже:",
+            reply_markup=training_selection_kb(),
         )
         return
 
     await _enter_training_mode(message, user_id, TRAINING_STATE_NEW)
+
+
+@dp.message(F.text.func(lambda text: (text or "").casefold() in TRAINING_MODE_NEW_COMMANDS))
+async def select_new_training_mode(message: Message):
+    user_id = message.from_user.id
+    _, state, _, _, _ = await get_user(user_id)
+
+    if state != TRAINING_STATE_SELECT:
+        return
+
+    await _enter_training_mode(message, user_id, TRAINING_STATE_NEW)
+
+
+@dp.message(F.text.func(lambda text: (text or "").casefold() in TRAINING_MODE_CONTINUE_COMMANDS))
+async def select_continue_training_mode(message: Message):
+    user_id = message.from_user.id
+    _, state, _, _, _ = await get_user(user_id)
+
+    if state != TRAINING_STATE_SELECT:
+        return
+
+    await _enter_training_mode(message, user_id, TRAINING_STATE_CONTINUE)
+
+
+@dp.message(F.text.func(lambda text: (text or "").casefold() in BACK_COMMANDS))
+async def cancel_training_selection(message: Message):
+    user_id = message.from_user.id
+    _, state, _, _, _ = await get_user(user_id)
+
+    if state != TRAINING_STATE_SELECT:
+        return
+
+    await set_state(user_id, "idle")
+    await message.answer(
+        "Хорошо, вернул в главное меню. Выбирай, что делать дальше.",
+        reply_markup=main_kb(),
+    )
 
 
 @dp.message(F.voice)
@@ -602,18 +645,6 @@ async def handle_text(message: Message):
     user_id = message.from_user.id
     user_id, state, profile_path, _, pending_text = await get_user(user_id)
     speaker_references = await get_speaker_references(user_id)
-
-    if state == TRAINING_STATE_SELECT:
-        text = (message.text or "").casefold()
-        if text in TRAINING_MODE_NEW_COMMANDS:
-            await _enter_training_mode(message, user_id, TRAINING_STATE_NEW)
-        elif text in TRAINING_MODE_CONTINUE_COMMANDS:
-            await _enter_training_mode(message, user_id, TRAINING_STATE_CONTINUE)
-        else:
-            await message.answer(
-                "Не понял режим. Напиши «Новое обучение» или «Продолжить обучение»."
-            )
-        return
 
     # реагируем только если пользователь в одном из режимов генерации
     if state not in {GENERATION_STATE_AWAITING_TEXT, GENERATION_STATE_AWAITING_MODE}:
