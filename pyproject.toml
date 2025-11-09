@@ -16,6 +16,7 @@ dependencies = [
     "aiosqlite",
     "TTS",
     "pydub",
+    "pyloudnorm",
 ]
 
 [project.optional-dependencies]

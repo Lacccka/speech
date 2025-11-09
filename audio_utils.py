@@ -2,6 +2,8 @@
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+import numpy as np
+import pyloudnorm as pyln
 from pydub import AudioSegment
 from pydub.effects import normalize
 
@@ -51,11 +53,41 @@ def convert_to_wav(src_path: str, dst_path: str):
     audio.export(dst_path, format="wav")
 
 
-def wav_to_ogg_opus(src: str, dst: str):
+def _segment_to_float_array(audio: AudioSegment) -> np.ndarray:
+    """Convert ``AudioSegment`` samples to a float array for pyloudnorm."""
+
+    sample_array = np.array(audio.get_array_of_samples())
+    if audio.channels > 1:
+        sample_array = sample_array.reshape((-1, audio.channels)).T
+    max_amplitude = float(2 ** (8 * audio.sample_width - 1))
+    return sample_array.astype(np.float32) / max_amplitude
+
+
+def measure_loudness_lufs(audio: AudioSegment) -> float:
+    """Return integrated loudness of ``audio`` in LUFS."""
+
+    meter = pyln.Meter(audio.frame_rate)
+    return meter.integrated_loudness(_segment_to_float_array(audio))
+
+
+def apply_loudness_normalization(
+    audio: AudioSegment, *, target_lufs: float = -16.0
+) -> AudioSegment:
+    """Adjust ``audio`` loudness towards ``target_lufs`` using LUFS metering."""
+
+    loudness = measure_loudness_lufs(audio)
+    if np.isfinite(loudness):
+        gain = target_lufs - loudness
+        audio = audio.apply_gain(gain)
+    return audio
+
+
+def wav_to_ogg_opus(src: str, dst: str, *, target_lufs: float = -16.0):
     """конвертация wav → ogg/opus с нормализацией громкости"""
     audio = AudioSegment.from_wav(src)
     normalized = normalize(audio)
     normalized = normalized.set_channels(1).set_frame_rate(24_000)
+    normalized = apply_loudness_normalization(normalized, target_lufs=target_lufs)
     dst_path = Path(dst)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     normalized.export(
