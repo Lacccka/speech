@@ -364,19 +364,23 @@ def _synthesize_to_file(
 
     synthesis_args.update(extra_options)
 
+    def _has_value(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        return True
+
+    speaker_kwargs: Dict[str, Any] = {}
     if speaker_identifier:
-        for key in ("speaker", "speaker_id"):
-            if key not in synthesis_args:
-                synthesis_args[key] = speaker_identifier
-                continue
+        if not _has_value(synthesis_args.get("speaker")):
+            synthesis_args.pop("speaker", None)
+            speaker_kwargs["speaker"] = speaker_identifier
+        elif not _has_value(synthesis_args.get("speaker_id")):
+            synthesis_args.pop("speaker_id", None)
+            speaker_kwargs["speaker_id"] = speaker_identifier
 
-            current_value = synthesis_args[key]
-            if current_value is None:
-                synthesis_args[key] = speaker_identifier
-            elif isinstance(current_value, str) and not current_value.strip():
-                synthesis_args[key] = speaker_identifier
-
-    wav = synthesizer.tts(**synthesis_args)
+    wav = synthesizer.tts(**synthesis_args, **speaker_kwargs)
     synthesizer.save_wav(wav=wav, path=out_wav)
 
     return AudioSegment.from_file(out_wav)

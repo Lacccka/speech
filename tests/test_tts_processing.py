@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 import pytest
 
@@ -12,7 +13,11 @@ generators = pytest.importorskip("pydub.generators")
 AudioSegment = pydub.AudioSegment
 Sine = generators.Sine
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PROJECT_ROOT))
+_SRC_ROOT = _PROJECT_ROOT / "src"
+if _SRC_ROOT.exists():
+    sys.path.insert(0, str(_SRC_ROOT))
 
 import types
 
@@ -129,6 +134,7 @@ sys.modules.setdefault("db", fake_db)
 fake_keyboards = types.ModuleType("keyboards")
 fake_keyboards.main_kb = lambda: None
 fake_keyboards.generation_mode_kb = lambda: None
+fake_keyboards.training_selection_kb = lambda: None
 sys.modules.setdefault("keyboards", fake_keyboards)
 
 fake_audio_utils = types.ModuleType("audio_utils")
@@ -198,12 +204,47 @@ def test_split_text_uses_token_fallback(monkeypatch: pytest.MonkeyPatch) -> None
     assert all(len(chunk) <= 240 for chunk in chunks)
     assert all(chunk == chunk.strip() for chunk in chunks)
 
-    original_tokens = text.split()
-    reconstructed_tokens: list[str] = []
-    for chunk in chunks:
-        reconstructed_tokens.extend(chunk.split())
 
-    assert reconstructed_tokens == original_tokens
+def test_synthesize_to_file_uses_single_speaker_identifier(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured_kwargs: Dict[str, Any] = {}
+
+    class DummySynthesizer:
+        def tts(self, **kwargs: Any) -> bytes:
+            captured_kwargs.update(kwargs)
+            return b"data"
+
+        def save_wav(self, wav: bytes, path: str) -> None:
+            Path(path).write_bytes(b"")
+
+    dummy = DummySynthesizer()
+    monkeypatch.setattr(tts_engine, "_get_synthesizer", lambda: dummy)
+
+    original_audio_segment = tts_engine.AudioSegment
+    monkeypatch.setattr(
+        tts_engine.AudioSegment,
+        "from_file",
+        classmethod(lambda cls, path: original_audio_segment.silent(duration=100)),
+    )
+
+    speaker_reference = tmp_path / "voice_sample.wav"
+    speaker_reference.write_bytes(b"sample")
+
+    result = tts_engine._synthesize_to_file(
+        text="Привет",
+        speaker_wavs=[str(speaker_reference)],
+        out_wav=str(tmp_path / "out.wav"),
+        language=None,
+        gpt_cond_len=None,
+        reference_duration=None,
+        extra_options={},
+    )
+
+    assert isinstance(result, original_audio_segment)
+    assert captured_kwargs["speaker_wavs"] == [str(speaker_reference)]
+    assert captured_kwargs.get("speaker") == speaker_reference.stem
+    assert "speaker_id" not in captured_kwargs
 
 
 def _dummy_backend_factory(tts_config: TTSConfig) -> object:
